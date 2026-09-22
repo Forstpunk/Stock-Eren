@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Generated research artifacts: reproducible by re-running the pipeline.
+# data/nse_holidays.csv is the one input file and IS tracked.
+data/bars/
+data/quarantine/
+data/*.jsonl
+data/*.parquet
+data/*.json
+data/report.txt
