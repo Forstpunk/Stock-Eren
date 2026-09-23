@@ -491,3 +491,52 @@ def test_accuracy_is_reported_next_to_the_majority_baseline(config: Config) -> N
     )
     # and it is not rewarded for that: the ranked score still judges it against the base rates
     assert s.verdict in {"no_better_than_base_rate", "informative"}
+
+
+def test_binary_flag_features_are_usable_in_a_fitted_rule(config: Config) -> None:
+    """A 0/1 flag has no terciles. The forecast must bucket it by value, as the study does,
+    or index_or_agrees would silently never contribute to any prediction."""
+    rng = np.random.default_rng(40)
+    rows = []
+    start = date(2026, 3, 2)
+    # three blocks with 30%, 50% and 80% ones, so the flag genuinely varies
+    for block, share in enumerate((0.3, 0.5, 0.8)):
+        for k in range(300):
+            day = start + timedelta(days=block * 20 + k // 15)
+            row = {f: float(rng.normal()) for f in FEATURE_NAMES}
+            row["index_or_agrees"] = float(rng.random() < share)
+            fails = rng.random() < (0.35 if row["index_or_agrees"] == 0.0 else 0.12)
+            row.update({
+                "symbol": f"S{k % 10}", "session_date": day, "direction": "long",
+                "breakout_time": datetime.combine(day, datetime.min.time(), tzinfo=IST),
+                "label": "BUSTED" if fails else ("SUSTAINED" if rng.random() < 0.4 else "NEITHER"),
+            })
+            rows.append(row)
+    df = pd.DataFrame(rows)
+
+    rule = fit_rule(df, config)
+    assert "index_or_agrees" in rule.usable_features, "a binary flag must be bucketable"
+    flag_buckets = [b for b in rule.buckets if b.feature == "index_or_agrees"]
+    assert len(flag_buckets) == 2, f"expected one bucket per value, got {len(flag_buckets)}"
+    assert {b.third for b in flag_buckets} == {"low", "high"}
+    assert {b.lower for b in flag_buckets} == {0.0, 1.0}
+    assert sum(b.n for b in flag_buckets) == len(df)
+
+    # and a row actually lands in the bucket matching its value
+    row = df[df["index_or_agrees"] == 1.0].iloc[0]
+    hit = next(b for b in buckets_hit(row, rule) if b.feature == "index_or_agrees")
+    assert hit.lower == 1.0
+
+
+def test_forecast_and_study_bucket_a_feature_identically(config: Config) -> None:
+    """The rule must be fitted on the same groups the study reports, or the two disagree."""
+    from intraday.analysis import bust_rate_by_third
+
+    df = make_features(40, 20, signal=1.5, seed=41)
+    rule = fit_rule(df, config)
+    for feature in rule.usable_features:
+        table = bust_rate_by_third(df, feature, "all")
+        assert table is not None
+        fitted = [b for b in rule.buckets if b.feature == feature]
+        assert [b.n for b in fitted] == [t.n for t in table.thirds], feature
+        assert [b.failures for b in fitted] == [t.busts for t in table.thirds], feature

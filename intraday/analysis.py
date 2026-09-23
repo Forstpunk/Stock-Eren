@@ -115,7 +115,7 @@ def split_date_at(dates: pd.Series, fraction: float = TRAIN_FRACTION) -> date | 
     return unique[len(first_half)] if len(first_half) < len(unique) else None
 
 
-def _buckets_for(values: np.ndarray) -> list[tuple[str, float, float, np.ndarray]] | None:
+def buckets_for(values: np.ndarray) -> list[tuple[str, float, float, np.ndarray]] | None:
     """(name, lower, upper, mask) per bucket: thirds by value, or one bucket per distinct
     value when the feature only takes a few (a 0/1 flag cannot be cut into thirds)."""
     distinct = np.unique(values)
@@ -143,7 +143,7 @@ def bust_rate_by_third(rows: pd.DataFrame, feature: str, scope: str) -> FeatureT
     if len(usable) < 3:
         return None
     values = usable[feature].to_numpy(dtype="float64")
-    buckets = _buckets_for(values)
+    buckets = buckets_for(values)
     if buckets is None:
         return None
     is_bust = (usable["label"] == Label.BUSTED.value).to_numpy()

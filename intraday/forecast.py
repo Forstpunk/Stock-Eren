@@ -49,7 +49,7 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
-from intraday.analysis import THIRD_NAMES
+from intraday.analysis import buckets_for
 from intraday.config import IST, Config
 from intraday.features import FEATURE_NAMES
 from intraday.labelling import Label
@@ -212,14 +212,15 @@ def fit_rule(train: pd.DataFrame, config: Config) -> Rule:
         if len(rows) < 3 * MIN_BUCKET_ROWS:
             continue
         values = rows[feature].to_numpy(dtype="float64")
-        edges = [float(np.quantile(values, q)) for q in (1 / 3, 2 / 3)]
-        if edges[0] == edges[1]:
+        # The study and the forecast must cut a feature the same way, or a rule is fitted
+        # on different groups from the ones reported. buckets_for also handles a 0/1 flag,
+        # which terciles cannot split at all.
+        layout = buckets_for(values)
+        if layout is None:
             continue
         fails = (rows["label"] == Label.BUSTED.value).to_numpy()
-        masks = [values <= edges[0], (values > edges[0]) & (values <= edges[1]), values > edges[1]]
-        bounds = [(float(values.min()), edges[0]), (edges[0], edges[1]), (edges[1], float(values.max()))]
         made: list[Bucket] = []
-        for third, mask, (lo, hi) in zip(THIRD_NAMES, masks, bounds):
+        for third, lo, hi, mask in layout:
             n = int(mask.sum())
             if n < MIN_BUCKET_ROWS:
                 made = []
