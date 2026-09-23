@@ -32,11 +32,18 @@ Two refinements over a plain average of bucket rates, both pre-registered:
   longer changes scale just because a feature is absent - which an average does, silently.
   Damping below 1 stops three agreeing features from compounding into false certainty.
 
-Each prediction also carries the full three-way split - p_busted, p_sustained, p_neither -
-because "will it fail?" throws away the difference between a breakout that runs and one
-that drifts, and those are not the same trade. The three are built the same way: shrunk
-class counts per bucket, combined as log-ratios against NEITHER, then normalised.
-``p_fail`` remains exactly ``p_busted`` so nothing downstream changes.
+Two models run side by side, and they are scored separately because they answer different
+questions.
+
+- ``p_fail`` is the pre-registered BINARY forecast: does this breakout fail? Built from the
+  failure rate of each bucket, combined in log-odds (or averaged). Scored with Brier.
+- ``p_busted`` / ``p_neither`` / ``p_sustained`` are the THREE-WAY forecast: which of the
+  three outcomes follows? Built from shrunk class counts per bucket, combined as log-ratios
+  against NEITHER, normalised. Scored with the ranked probability score.
+
+``p_fail`` and ``p_busted`` answer overlapping questions and will be close, but they are
+not the same number and neither is derived from the other. Reporting one as the other
+would mean the Brier score no longer grades the model that was pre-registered.
 """
 from __future__ import annotations
 
@@ -124,34 +131,51 @@ class Prediction(BaseModel):
     direction: str
     breakout_time: datetime
     made_at: datetime  # when the forecast was produced
-    p_fail: float  # identical to class_probabilities[BUSTED]; kept so callers do not break
-    class_probabilities: dict[str, float]  # BUSTED / NEITHER / SUSTAINED, summing to 1
+    p_fail: float  # the binary model's answer; scored with Brier
+    class_probabilities: dict[str, float]  # the three-way model's answer, summing to 1
     base_rate: float  # what the naive forecast would have said
     base_class_shares: dict[str, float]
-    contributions: dict[str, float]  # feature -> shrunk bucket rate used
+    contributions: dict[str, float]  # feature -> shrunk bucket failure rate used (binary)
     log_odds: dict[str, float]  # feature -> logit(bucket) - logit(base), before damping
+    class_contributions: dict[str, dict[str, float]]  # feature -> its bucket's class rates
+    damping: float
+    combination: str
     outcome: str | None = None  # filled in only by scoring, never by prediction
 
     def explain(self) -> list[str]:
-        """Every number behind the prediction, so it can be checked with a calculator.
+        """Every number behind both predictions, so each can be rebuilt with a calculator.
 
-        The binary line shows how far each feature moves the odds of failure; the
-        three-way line is what ``p_fail`` is actually taken from.
+        The binary block produces ``p_fail``; the three-way block produces
+        ``class_probabilities``. They are separate calculations and both are shown, because
+        a printed probability nobody can reproduce is not a checkable forecast.
         """
         lines = [
-            f"base rates: "
-            + ", ".join(f"{c.lower()} {self.base_class_shares.get(c, 0.0):.1%}" for c in ORDERED_CLASSES)
+            "BINARY (scored with Brier, this is p_fail)",
+            f"  base failure rate {self.base_rate:.4f}  ->  logit {_logit(self.base_rate):+.4f}",
         ]
         for feature, rate in self.contributions.items():
             lines.append(
-                f"  {feature}: failure bucket {rate:.1%} -> logit {_logit(rate):+.4f}, "
-                f"contributes {self.log_odds[feature]:+.4f} to the odds of failure"
+                f"  {feature}: bucket {rate:.4f} -> logit {_logit(rate):+.4f}, "
+                f"contributes {self.log_odds[feature]:+.4f}"
             )
         lines.append(
-            "three-way: "
-            + ", ".join(f"{c.lower()} {self.class_probabilities[c]:.1%}" for c in ORDERED_CLASSES)
+            f"  logit total {_logit(self.base_rate) + self.damping * sum(self.log_odds.values()):+.4f}"
+            f"  ->  p_fail {self.p_fail:.4f}   (damping {self.damping:g}, combination {self.combination})"
         )
-        lines.append(f"p(fail) {self.p_fail:.1%} (the BUSTED share of the three-way split)")
+        lines.append("THREE-WAY (scored with RPS)")
+        lines.append(
+            "  base shares: "
+            + ", ".join(f"{c.lower()} {self.base_class_shares.get(c, 0.0):.4f}" for c in ORDERED_CLASSES)
+        )
+        for feature, rates in self.class_contributions.items():
+            lines.append(
+                f"  {feature}: "
+                + ", ".join(f"{c.lower()} {rates.get(c, 0.0):.4f}" for c in ORDERED_CLASSES)
+            )
+        lines.append(
+            "  result: "
+            + ", ".join(f"{c.lower()} {self.class_probabilities[c]:.4f}" for c in ORDERED_CLASSES)
+        )
         return lines
 
 
@@ -281,12 +305,15 @@ def predict_one(row: pd.Series, rule: Rule, made_at: datetime | None = None) -> 
         direction=str(row["direction"]),
         breakout_time=pd.Timestamp(row["breakout_time"]).to_pydatetime(),
         made_at=made_at or datetime.now(tz=IST),
-        p_fail=classes[Label.BUSTED.value],
+        p_fail=p,
         class_probabilities=classes,
         base_rate=rule.base_rate,
         base_class_shares=dict(rule.class_shares),
         contributions=contributions,
         log_odds=log_odds,
+        class_contributions={b.feature: dict(b.class_rates) for b in hit},
+        damping=rule.damping,
+        combination=rule.combination,
     )
 
 

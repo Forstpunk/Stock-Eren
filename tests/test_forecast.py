@@ -70,10 +70,15 @@ def test_rule_ignores_features_with_thin_buckets(config: Config) -> None:
 
 
 def test_prediction_combines_its_buckets_in_log_odds(config: Config) -> None:
-    """Averaged bucket rates before Phase 5, damped log-odds after it, and since Phase 6
-    p_fail is the BUSTED share of the three-way split rather than a separate binary number.
-    The log_odds field is kept as the per-feature diagnostic for the odds of failure."""
+    """Averaged bucket rates before Phase 5, damped log-odds after it.
+
+    Phase 6 briefly redefined p_fail as the BUSTED share of the three-way split; code
+    review restored it, because the Brier score is supposed to grade the binary model that
+    was pre-registered, not a different one wearing its name."""
+    import math as _m
+
     from intraday.forecast import ORDERED_CLASSES
+    from intraday.forecast import _logit as _logit_of
 
     df = make_features(40, 20, signal=1.5, seed=3)
     rule = fit_rule(df, config)
@@ -82,7 +87,9 @@ def test_prediction_combines_its_buckets_in_log_odds(config: Config) -> None:
     assert p.contributions, "a complete row should hit a bucket for each usable feature"
     assert set(p.contributions) <= set(rule.usable_features)
     assert set(p.log_odds) == set(p.contributions)
-    assert p.p_fail == pytest.approx(p.class_probabilities["BUSTED"])
+    expected = _logit_of(rule.base_rate) + rule.damping * sum(p.log_odds.values())
+    assert p.p_fail == pytest.approx(1 / (1 + _m.exp(-expected)), abs=1e-9)
+    # the three-way model is a separate calculation; close, but not the same number
     assert sum(p.class_probabilities[c] for c in ORDERED_CLASSES) == pytest.approx(1.0)
     assert p.outcome is None, "a prediction must not carry the answer"
 
@@ -311,10 +318,10 @@ def test_a_missing_feature_contributes_nothing(config: Config) -> None:
 
 
 def test_explain_reproduces_the_number(config: Config) -> None:
-    """The printed pieces must rebuild p_fail, or the forecast is not hand-checkable.
+    """The printed pieces must rebuild BOTH probabilities, or they are not checkable.
 
-    Since Phase 6, p_fail is the BUSTED share of the three-way split, so the rebuild goes
-    through the class log-ratios rather than the binary logit.
+    explain() prints a binary block and a three-way block because they are two separate
+    calculations answering two different questions.
     """
     import math as _m
 
@@ -325,6 +332,13 @@ def test_explain_reproduces_the_number(config: Config) -> None:
     row = df.iloc[0]
     p = predict_one(row, rule)
 
+    # the binary block must rebuild p_fail
+    from intraday.forecast import _logit as _logit_of
+
+    rebuilt = _logit_of(p.base_rate) + rule.damping * sum(p.log_odds.values())
+    assert 1 / (1 + _m.exp(-rebuilt)) == pytest.approx(p.p_fail, abs=1e-9)
+
+    # and the three-way block must rebuild the class probabilities
     hit = buckets_hit(row, rule)
     scores = {}
     for cls in ORDERED_CLASSES:
@@ -333,10 +347,13 @@ def test_explain_reproduces_the_number(config: Config) -> None:
             class_log_ratio(b.class_rates, cls) - base_ratio for b in hit
         )
     weights = {c: _m.exp(v - max(scores.values())) for c, v in scores.items()}
-    assert weights["BUSTED"] / sum(weights.values()) == pytest.approx(p.p_fail, abs=1e-9)
+    assert weights["BUSTED"] / sum(weights.values()) == pytest.approx(
+        p.class_probabilities["BUSTED"], abs=1e-9
+    )
 
     text = "\n".join(p.explain())
-    assert "base rates" in text and "three-way" in text and "p(fail)" in text
+    assert "BINARY" in text and "THREE-WAY" in text
+    assert "p_fail" in text and "base shares" in text
 
 
 def test_average_combination_is_still_available(config: Config) -> None:
@@ -379,7 +396,8 @@ def test_class_probabilities_sum_to_one(config: Config) -> None:
         p = predict_one(df.iloc[k], rule)
         assert sum(p.class_probabilities[c] for c in ORDERED_CLASSES) == pytest.approx(1.0)
         assert all(0.0 <= p.class_probabilities[c] <= 1.0 for c in ORDERED_CLASSES)
-        assert p.p_fail == pytest.approx(p.class_probabilities["BUSTED"])
+        # p_fail comes from the binary model, so it is close to p(BUSTED) but not equal
+        assert abs(p.p_fail - p.class_probabilities["BUSTED"]) < 0.25
 
 
 def test_no_buckets_hit_gives_the_training_class_shares(config: Config) -> None:
@@ -540,3 +558,35 @@ def test_forecast_and_study_bucket_a_feature_identically(config: Config) -> None
         fitted = [b for b in rule.buckets if b.feature == feature]
         assert [b.n for b in fitted] == [t.n for t in table.thirds], feature
         assert [b.failures for b in fitted] == [t.busts for t in table.thirds], feature
+
+
+
+def test_explain_lets_you_recompute_p_fail_by_hand(config: Config) -> None:
+    """Take only the numbers explain() prints and rebuild p_fail from them.
+
+    This is the whole claim of the module: no black box, every probability traceable to
+    printed counts. The parsing here is deliberately literal - it reads the printed text,
+    not the objects behind it.
+    """
+    import math as _m
+    import re
+
+    df = make_features(40, 20, signal=1.5, seed=50)
+    rule = fit_rule(df, config)
+    p = predict_one(df.iloc[0], rule)
+    lines = p.explain()
+
+    binary = lines[: lines.index("THREE-WAY (scored with RPS)")]
+    base = float(re.search(r"base failure rate ([0-9.]+)", binary[1]).group(1))
+    contributions = [
+        float(m.group(1))
+        for line in binary
+        if (m := re.search(r"contributes ([+-][0-9.]+)", line))
+    ]
+    damping = float(re.search(r"damping ([0-9.]+)", binary[-1]).group(1))
+    printed = float(re.search(r"p_fail ([0-9.]+)", binary[-1]).group(1))
+
+    rebuilt = _m.log(base / (1 - base)) + damping * sum(contributions)
+    by_hand = 1 / (1 + _m.exp(-rebuilt))
+    assert by_hand == pytest.approx(printed, abs=5e-5), "the printed numbers must reproduce the printed answer"
+    assert by_hand == pytest.approx(p.p_fail, abs=5e-5)
