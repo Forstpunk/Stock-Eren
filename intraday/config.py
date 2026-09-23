@@ -66,9 +66,14 @@ class Config(BaseModel):
     slippage_bps: tuple[int, ...] = (5, 10, 20)
     min_sample: int = Field(default=30, gt=0)
     rvol_threshold: float = Field(default=2.0, gt=0)
+    # Reserved for the stocks-in-play universe filter (RESEARCH.md item 1); not used yet.
     gap_threshold_pct: float = Field(default=1.0, gt=0)
     atr_pct_threshold: float = Field(default=1.5, gt=0)
     turnover_threshold_inr: float = Field(default=10 * 1e7, gt=0)  # Rs 10 crore
+
+    # A daily bar whose open sits outside this ratio of the previous close is flagged
+    # SUSPECT: usually an unadjusted split, bonus or demerger rather than a real move.
+    split_suspect_ratio: tuple[float, float] = (0.6, 1.6)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -120,6 +125,9 @@ class Config(BaseModel):
             raise ValueError(f"bust_cutoff {self.bust_cutoff} must lie inside the session")
         if not (self.session_start < self.last_entry_time < self.session_end):
             raise ValueError(f"last_entry_time {self.last_entry_time} must lie inside the session")
+        low, high = self.split_suspect_ratio
+        if not 0 < low < 1 < high:
+            raise ValueError(f"split_suspect_ratio must straddle 1.0, got {self.split_suspect_ratio}")
         if not self.slippage_bps or any(b < 0 for b in self.slippage_bps):
             raise ValueError(f"slippage_bps must be non-empty and non-negative, got {self.slippage_bps}")
         return self

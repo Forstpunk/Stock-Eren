@@ -34,6 +34,16 @@ class DataUnavailableError(Exception):
         super().__init__(f"{symbol} {interval} {start:%Y-%m-%d} -> {end:%Y-%m-%d}: {reason}")
 
 
+class SymbolNotResolvable(DataUnavailableError):
+    """The source has no instrument for this symbol at all.
+
+    Kept separate from a plain fetch failure because the cause is different and so is the
+    consequence: the symbol is silently absent from every result, which biases a study
+    towards names that still exist today. Callers report these together rather than
+    aborting, and never substitute another instrument.
+    """
+
+
 class BarSource(Protocol):
     name: str
     max_history_days: dict[str, int]  # interval -> days available

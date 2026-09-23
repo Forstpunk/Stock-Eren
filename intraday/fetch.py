@@ -14,7 +14,7 @@ from rich.console import Console
 from rich.table import Table
 
 from intraday.config import IST, Config
-from intraday.sources import BarSource, DataUnavailableError
+from intraday.sources import BarSource, DataUnavailableError, SymbolNotResolvable
 from intraday.store import BarStore
 from intraday.trading_calendar import TradingCalendar
 from intraday.validate import Verdict, drop_settling_tail, split_sessions, validate_daily_row, validate_session
@@ -31,7 +31,9 @@ class SymbolOutcome(BaseModel):
     missing_slot_counts: dict[str, int]
     daily_rows: int
     daily_corrupt: int
+    daily_suspect: int
     error: str | None
+    unresolvable: bool = False
 
 
 class FetchSummary(BaseModel):
@@ -74,20 +76,26 @@ def fetch_daily(
     source: BarSource,
     daily_store: BarStore,
     calendar: TradingCalendar,
-) -> tuple[int, int]:
-    """Fetch, validate per row and store daily bars. Returns (rows stored, rows CORRUPT).
+) -> tuple[int, int, int]:
+    """Fetch, validate per row and store daily bars. Returns (rows, CORRUPT, SUSPECT).
     Raises DataUnavailableError like any other fetch."""
     fetched_at = datetime.now(tz=IST)
     start = end - timedelta(days=config.daily_history_days)
     daily = source.fetch(symbol, config.daily_interval, start, end)
     validated = []
+    previous_close: float | None = None
     for session_date, row in split_sessions(daily).items():
         if session_date == fetched_at.date():
             continue  # in-progress daily bar
-        validated.append((validate_daily_row(row, symbol, session_date, calendar, fetched_at), row))
+        verdict = validate_daily_row(
+            row, symbol, session_date, calendar, fetched_at, previous_close=previous_close, config=config
+        )
+        validated.append((verdict, row))
+        previous_close = float(row["close"].iloc[0])
     daily_store.put_sessions(symbol, validated)
     corrupt = sum(1 for v, _ in validated if v.verdict is Verdict.CORRUPT)
-    return len(validated), corrupt
+    suspect = sum(1 for v, _ in validated if v.verdict is Verdict.SUSPECT)
+    return len(validated), corrupt, suspect
 
 
 def fetch_symbol(
@@ -104,12 +112,20 @@ def fetch_symbol(
     fetched_at = datetime.now(tz=IST)
     try:
         bars = source.fetch(symbol, config.interval, start, end)
-        daily_rows, daily_corrupt = fetch_daily(symbol, end, config, source, daily_store, calendar)
+        daily_rows, daily_corrupt, daily_suspect = fetch_daily(
+            symbol, end, config, source, daily_store, calendar
+        )
+    except SymbolNotResolvable as exc:
+        return SymbolOutcome(
+            symbol=symbol, expected_sessions=len(expected), received_sessions=0, verdicts={},
+            missing_dates=tuple(expected), missing_slot_counts={}, daily_rows=0, daily_corrupt=0,
+            daily_suspect=0, error=exc.reason, unresolvable=True,
+        )
     except DataUnavailableError as exc:
         return SymbolOutcome(
             symbol=symbol, expected_sessions=len(expected), received_sessions=0, verdicts={},
             missing_dates=tuple(expected), missing_slot_counts={}, daily_rows=0, daily_corrupt=0,
-            error=exc.reason,
+            daily_suspect=0, error=exc.reason,
         )
 
     validated = []
@@ -139,6 +155,7 @@ def fetch_symbol(
         missing_slot_counts=dict(slots),
         daily_rows=daily_rows,
         daily_corrupt=daily_corrupt,
+        daily_suspect=daily_suspect,
         error=None,
     )
 
@@ -246,6 +263,27 @@ def print_tally(summary: FetchSummary, console: Console) -> None:
         )
     daily_rows = sum(o.daily_rows for o in ok)
     daily_corrupt = sum(o.daily_corrupt for o in ok)
-    console.print(f"daily bars: {daily_rows} rows stored across {len(ok)} symbols, {daily_corrupt} CORRUPT")
-    if summary.failed:
-        console.print(f"[red]{len(summary.failed)} symbol(s) failed: " + ", ".join(o.symbol for o in summary.failed))
+    daily_suspect = sum(o.daily_suspect for o in ok)
+    console.print(
+        f"daily bars: {daily_rows} rows stored across {len(ok)} symbols, {daily_corrupt} CORRUPT, "
+        f"{daily_suspect} SUSPECT (possible unadjusted corporate actions)"
+    )
+
+    unresolvable = [o for o in summary.outcomes if o.unresolvable]
+    if unresolvable:
+        console.print()
+        console.print(
+            f"[yellow]symbols not resolvable (possible survivorship bias): "
+            + ", ".join(o.symbol for o in unresolvable)
+        )
+        console.print(
+            "  The source has no instrument for these today. They may be delisted, renamed or "
+            "merged. They are excluded from the study and never substituted, so any result below "
+            "describes only the names that still exist."
+        )
+    other_failures = [o for o in summary.failed if not o.unresolvable]
+    if other_failures:
+        console.print(
+            f"[red]{len(other_failures)} symbol(s) failed to fetch: "
+            + ", ".join(o.symbol for o in other_failures)
+        )

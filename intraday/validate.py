@@ -189,9 +189,14 @@ def validate_daily_row(
     session_date: date,
     calendar: TradingCalendar,
     fetched_at: datetime,
+    previous_close: float | None = None,
+    config: Config | None = None,
 ) -> SessionVerdict:
-    """One daily bar is one session. Checks: trading day, OHLC sanity. Same-day rows are
-    the caller's job to drop (an in-progress daily bar is not a bar)."""
+    """One daily bar is one session. Checks: trading day, OHLC sanity, and - when
+    ``previous_close`` is given - whether the open gapped so far from it that an
+    unadjusted corporate action is the likelier explanation than a real move.
+
+    Same-day rows are the caller's job to drop (an in-progress daily bar is not a bar)."""
     if len(row) != 1:
         raise ValueError(f"{symbol} {session_date}: expected one daily row, got {len(row)}")
     if tuple(row.columns) != BAR_COLUMNS:
@@ -209,10 +214,22 @@ def validate_daily_row(
         reasons.append("CORRUPT: OHLC inconsistent")
     elif r["volume"] < 0:
         reasons.append("CORRUPT: negative volume")
+
+    verdict = Verdict.CORRUPT if reasons else Verdict.CLEAN
+    if verdict is Verdict.CLEAN and previous_close is not None and previous_close > 0:
+        low, high = (config or Config()).split_suspect_ratio
+        ratio = float(r["open"]) / previous_close
+        if not low <= ratio <= high:
+            verdict = Verdict.SUSPECT
+            reasons.append(
+                f"SUSPECT: possible unadjusted corporate action - open {float(r['open']):.2f} is "
+                f"{ratio:.2f}x the previous close {previous_close:.2f}, outside {low}-{high}"
+            )
+
     return SessionVerdict(
         symbol=symbol,
         session_date=session_date,
-        verdict=Verdict.CORRUPT if reasons else Verdict.CLEAN,
+        verdict=verdict,
         bar_count=1,
         expected_bars=1,
         zero_volume_bars=int(r["volume"] == 0),

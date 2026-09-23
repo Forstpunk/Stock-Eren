@@ -231,3 +231,49 @@ def test_daily_row_verdicts(calendar: TradingCalendar) -> None:
     assert validate_daily_row(row(MONDAY, low=100.8), "X", MONDAY, calendar, FETCHED_LATER).verdict is Verdict.CORRUPT
     with pytest.raises(ValueError, match="one daily row"):
         validate_daily_row(pd.concat([row(MONDAY), row(MONDAY)]), "X", MONDAY, calendar, FETCHED_LATER)
+
+
+def test_daily_row_flags_possible_unadjusted_corporate_action(config: Config, calendar: TradingCalendar) -> None:
+    """A 1:2 split shows up as the open halving overnight, with no real move behind it."""
+    from intraday.validate import validate_daily_row
+
+    def row(open_: float) -> pd.DataFrame:
+        idx = pd.DatetimeIndex([datetime.combine(MONDAY, time(0, 0), tzinfo=IST)], name="ts")
+        return pd.DataFrame(
+            {"open": [open_], "high": [open_ * 1.01], "low": [open_ * 0.99],
+             "close": [open_], "volume": [5_000_000]},
+            index=idx,
+        ).astype({"volume": "int64"})
+
+    split = validate_daily_row(row(500.0), "X", MONDAY, calendar, FETCHED_LATER, previous_close=1000.0, config=config)
+    assert split.verdict is Verdict.SUSPECT
+    assert "possible unadjusted corporate action" in split.reasons[0]
+    assert "0.50x" in split.reasons[0]
+
+    ordinary = validate_daily_row(row(1020.0), "X", MONDAY, calendar, FETCHED_LATER, previous_close=1000.0, config=config)
+    assert ordinary.verdict is Verdict.CLEAN
+
+    # Without a previous close there is nothing to compare against, so no claim is made.
+    unknown = validate_daily_row(row(500.0), "X", MONDAY, calendar, FETCHED_LATER, previous_close=None, config=config)
+    assert unknown.verdict is Verdict.CLEAN
+
+
+def test_corporate_action_check_never_masks_a_corrupt_row(config: Config, calendar: TradingCalendar) -> None:
+    """CORRUPT outranks SUSPECT: a broken row is not downgraded to 'probably a split'."""
+    from intraday.validate import validate_daily_row
+
+    idx = pd.DatetimeIndex([datetime.combine(MONDAY, time(0, 0), tzinfo=IST)], name="ts")
+    broken = pd.DataFrame(
+        {"open": [500.0], "high": [400.0], "low": [499.0], "close": [500.0], "volume": [1]}, index=idx
+    ).astype({"volume": "int64"})
+    v = validate_daily_row(broken, "X", MONDAY, calendar, FETCHED_LATER, previous_close=1000.0, config=config)
+    assert v.verdict is Verdict.CORRUPT
+
+
+def test_split_suspect_ratio_bounds_are_validated() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="straddle 1.0"):
+        Config(split_suspect_ratio=(1.2, 1.6))
+    with pytest.raises(ValidationError, match="straddle 1.0"):
+        Config(split_suspect_ratio=(0.6, 0.9))

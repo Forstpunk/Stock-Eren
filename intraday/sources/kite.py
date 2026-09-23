@@ -26,7 +26,7 @@ from pathlib import Path
 import pandas as pd
 
 from intraday.config import IST
-from intraday.sources import BAR_COLUMNS, DataUnavailableError, assert_bar_contract
+from intraday.sources import BAR_COLUMNS, DataUnavailableError, SymbolNotResolvable, assert_bar_contract
 
 # pipeline interval -> Kite interval
 _INTERVALS = {"1m": "minute", "3m": "3minute", "5m": "5minute", "15m": "15minute", "30m": "30minute", "1d": "day"}
@@ -60,8 +60,15 @@ def token_is_stale(issued_at: datetime, now: datetime) -> bool:
 
 class KiteSource:
     name = "kite"
-    # Subscription dependent; these are the documented maxima for a historical-data plan.
-    max_history_days: dict[str, int] = {"1m": 60, "3m": 3650, "5m": 3650, "15m": 3650, "30m": 3650, "1d": 3650}
+    # Total history available, NOT the per-request cap - those are different numbers and
+    # conflating them silently truncates a study. The per-request caps live in
+    # _MAX_DAYS_PER_REQUEST below (60 days for minute candles, 100 for 5minute, and so on).
+    # VERIFY: Kite's own docs publish the per-request caps but not a single authoritative
+    # retention figure. The developer forum states roughly 3 years for 1-minute candles and
+    # longer for coarser intervals, and retention is subscription dependent. 1m is set to
+    # 1095 days on that basis; the others assume a full 10-year plan. If a fetch fails with
+    # an empty response for an old range, lower these rather than assuming the data is gone.
+    max_history_days: dict[str, int] = {"1m": 1095, "3m": 3650, "5m": 3650, "15m": 3650, "30m": 3650, "1d": 3650}
     _min_seconds_between_requests: float = 1 / 3  # 3 req/sec on the historical endpoint
 
     def __init__(self, cache_dir: Path | None = None) -> None:
@@ -94,9 +101,13 @@ class KiteSource:
             self._instruments = self._load_instruments()
         token = self._instruments.get(symbol)
         if token is None:
-            raise DataUnavailableError(
+            raise SymbolNotResolvable(
                 symbol, "-", datetime.now(tz=IST), datetime.now(tz=IST),
-                f"{symbol} is not in today's NSE instrument list",
+                f"{symbol} is not in today's NSE instrument list. It may be delisted, renamed, "
+                "merged, or simply misspelt. The instrument dump only describes instruments that "
+                "exist today, so a study built from it silently excludes names that have since "
+                "disappeared - survivorship bias. This symbol is excluded and reported, never "
+                "substituted.",
             )
         return token
 
