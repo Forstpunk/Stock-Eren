@@ -125,3 +125,53 @@ Zarattini & Aziz but carry no published validation.
 
 Items 1–3 are pre-registered here **before** being run, so that if they are tried and fail
 the record shows they were chosen from the literature and not from our own data.
+
+---
+
+# Pre-registered features, round 2
+
+**Written before implementation, on 2026-09-23.** The point of writing these down first is
+that a feature chosen after seeing which one worked is not evidence. Each entry states the
+exact definition, the mechanism it is supposed to capture, and the direction expected of
+the failure rate. If a feature comes out the other way, that is a result, not a reason to
+re-label the expectation.
+
+All are computed at the close of the breakout bar, from bars at positions `<= i` only, and
+are NaN when undefined. Signing by direction means multiplying by −1 for short breakouts,
+so a positive value always means "in the direction of the breakout".
+
+| name | definition | mechanism | expected |
+|---|---|---|---|
+| `rel_strength_vs_index` | (stock close_i / stock session open − 1) − (index close at the same timestamp / index session open − 1), signed by breakout direction | a stock moving with its own demand rather than the market's tide has real buyers behind it | higher → fails less |
+| `index_or_agrees` | 1 if the index (`config.index_symbol`) has closed beyond its own opening range in the same direction at or before the breakout timestamp; 0 if not; NaN if index bars are missing | a breakout fighting the index is a breakout fighting every correlated seller | 1 → fails less |
+| `gap_atr_signed` | `gap_pct` converted to price terms ÷ prior-day ATR, signed by breakout direction (positive = gap in the breakout direction) | a gap in the breakout's direction means the move began before the session and has overnight commitment behind it | higher → fails less |
+| `prior_day_return_atr_signed` | (prior-day close − prior-day open) ÷ prior-day ATR, signed by breakout direction | continuation versus exhaustion — both stories are told, and neither is obviously right | **two-sided: report only** |
+| `breakout_depth_atr` | abs(breakout close − broken boundary) ÷ prior-day ATR | a decisive close through the level is harder to reclaim than a marginal one | higher → fails less |
+| `is_expiry_day` | 1 if the session date is in `data/nse_expiries.csv`, else 0; NaN if the date is outside the file's covered range | expiry-day positioning and pinning distort intraday ranges | **two-sided: report only** |
+| `day_of_week` | 0–4 | segmentation only | not tested as a mechanism |
+
+**Two-sided features are shown in the report but can never on their own produce a
+`signal` verdict.** There is no honest direction to predict for them, so "it came out
+significant" would be a coin flip dressed up as a finding.
+
+## Parameter changes pre-registered with them
+
+- **`rvol_lookback_sessions` 20 → 14.** Taken from Zarattini & Aziz, whose relative-volume
+  definition uses the previous 14 days. Already proposed as item 2 of the list above. It is
+  a definition change and will be logged in the README changelog when implemented. It is
+  chosen from the source, not from our results.
+- **Forecast shrinkage `k = 40`** and **log-odds damping `0.6`**, fixed here in advance.
+  These are not to be tuned against study or forecast output. `k = 40` means a bucket needs
+  about 40 observations before it is trusted as much as the base rate; damping 0.6 keeps a
+  three-feature agreement from compounding into a false certainty.
+
+## Multiple testing
+
+Round 1 tested 3 features. Round 2 tests 5 directional ones (the two-sided pair excluded
+from the verdict). Under the two-period rule each feature has its own chance of passing by
+luck, so with five features the chance that **at least one** does is roughly five times a
+single feature's — for an individual false-positive rate of about 5%, that is roughly 23%.
+
+The report must therefore state how many features were tested. A `signal` verdict resting
+on one feature out of five is weaker evidence than the same verdict resting on one out of
+one, and the reader cannot judge that without the count.
