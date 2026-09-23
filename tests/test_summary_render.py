@@ -19,7 +19,7 @@ from intraday.report import render_plain_summary, render_study
 WIDTH = 150
 
 # Language that would turn a measurement into a recommendation. Guard against drift,
-# including by a future AI assistant.
+# including by a future contributor.
 FORBIDDEN = ("buy", "sell", "target price", "entry at")
 
 

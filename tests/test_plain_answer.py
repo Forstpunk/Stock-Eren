@@ -20,7 +20,23 @@ WIDTH = 100
 FORBIDDEN = ("buy", "sell", "target price", "entry at", "should trade", "recommend")
 
 
-def make_report(setup_verdict: str = "no edge", study_verdict: str = "no_signal", with_money: bool = True) -> Report:
+def make_forecast(verdict: str = "informative"):  # type: ignore[no-untyped-def]
+    from intraday.forecast import CalibrationBin, Score
+
+    return Score(
+        n=408, failures=73, brier=0.1434, brier_base=0.1481, skill=0.032, skill_ci=(0.010, 0.051),
+        calibration=(
+            CalibrationBin(lower=0.1, upper=0.2, n=228, mean_forecast=0.164, observed_rate=0.118),
+            CalibrationBin(lower=0.2, upper=0.3, n=179, mean_forecast=0.236, observed_rate=0.257),
+        ),
+        verdict=verdict, statement="…",
+    )
+
+
+def make_report(
+    setup_verdict: str = "no edge", study_verdict: str = "no_signal", with_money: bool = True,
+    forecast=None,  # type: ignore[no-untyped-def]
+) -> Report:
     from intraday.report import IntegritySummary
 
     integrity = IntegritySummary(
@@ -51,6 +67,7 @@ def make_report(setup_verdict: str = "no edge", study_verdict: str = "no_signal"
         n_sessions=40,
         first_date="2026-07-27",
         last_date="2026-09-21",
+        forecast=forecast,
         money=money,
         bottom_line=(
             "This setup (orb) lost money on this data, at every slippage level.",
@@ -126,3 +143,23 @@ def test_signal_does_not_promise_profit() -> None:
     assert "worked - see the tables below" in text
     # a separation is still not an edge, and the bottom line has to say so
     assert "forecast" in text
+
+
+def test_forecast_result_answers_the_prediction_question() -> None:
+    """When forecasts were scored, the short version must report what they achieved."""
+    text = render(make_report(forecast=make_forecast("informative")))
+    assert "A little." in text
+    assert "408" in text, "the number of scored forecasts must appear"
+    assert "12%" in text and "26%" in text, "the safest and riskiest observed rates must appear"
+    assert "not enough to cover costs" in text
+
+
+def test_forecast_that_failed_is_reported_as_such() -> None:
+    text = render(make_report(forecast=make_forecast("no_better_than_base_rate")))
+    assert "did not beat the base rate" in text
+    assert "A little." not in text
+
+
+def test_without_a_forecast_it_says_so() -> None:
+    text = render(make_report(forecast=None))
+    assert "too little history" in text

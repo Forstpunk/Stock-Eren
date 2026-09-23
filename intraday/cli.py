@@ -45,6 +45,7 @@ def cmd_update(args: argparse.Namespace, config: Config) -> int:
 
 def cmd_study(args: argparse.Namespace, config: Config) -> int:
     from intraday.analysis import run_study
+    from intraday.forecast import save_predictions, walk_forward
     from intraday.backtest import run_backtest, save_backtest
     from intraday.features import build_feature_table, save_features
     from intraday.labelling import label_universe, save_breakouts
@@ -74,6 +75,14 @@ def cmd_study(args: argparse.Namespace, config: Config) -> int:
     (config.data_dir / STUDY_FILE).write_text(study.model_dump_json(indent=2), encoding="utf-8")
     console.print(f"  verdict: {study.verdict}")
 
+    console.print("forecasting (walk-forward, each session predicted from earlier ones only) ...")
+    try:
+        predictions = walk_forward(features, config)
+        save_predictions(predictions, config.data_dir)
+        console.print(f"  {len(predictions)} predictions made and saved")
+    except ValueError as exc:
+        console.print(f"  [yellow]skipped: {exc}")
+
     for name in SETUPS:
         console.print(f"backtesting {name} ...")
         try:
@@ -82,6 +91,10 @@ def cmd_study(args: argparse.Namespace, config: Config) -> int:
             )
         except GateClosedError as exc:
             console.print(f"  [yellow]skipped: {exc}")
+            for stale in (config.data_dir / f"backtest_{name}.json", config.data_dir / f"backtest_{name}.parquet"):
+                if stale.exists():
+                    stale.unlink()
+                    console.print(f"  [yellow]removed stale {stale.name} from a run when the gate was open")
             continue
         save_backtest(summary, table, config.data_dir)
         console.print(f"  {summary.n_signals} signals")

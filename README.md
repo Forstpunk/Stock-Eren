@@ -100,6 +100,22 @@ the session has less time to resolve either way.
 - Yahoo's daily feed emits a phantom flat, zero-volume row on NSE holidays; the trading
   calendar catches and quarantines them (80 rows across 20 equities).
 
+## Forecasting, not just measuring
+
+`study` also makes real forecasts and grades them. For every session after the first 20 it
+refits a rule on **earlier sessions only**, predicts each breakout's probability of
+failing, and only afterwards joins the outcome to score it. The score is a Brier skill
+against the naive "always say the base rate" forecast, with a bootstrap interval, plus a
+calibration table of what it said against what happened.
+
+The rule is a lookup table — the failure rate of each third of each feature in the
+training window — so any prediction can be checked by hand from the printed buckets.
+
+On the current data it scores **+3.2% skill (95% CI +1.0% to +5.1%)** over 408 forecasts:
+the breakouts it called safest failed 12% of the time, the ones it called riskiest 26%.
+That is a genuine out-of-sample signal, and it is still smaller than the ₹150 round-trip
+cost, so it does not turn into profit. See RESEARCH.md.
+
 ## Current result
 
 On 41 sessions x 20 symbols: 20% of breakouts failed, stable month to month. The baseline
@@ -112,5 +128,10 @@ exist on 347 of 840 breakouts, and the first half holds 13 failures where they e
 against a floor of 30.
 
 That is a limit of the data, not of the method. yfinance serves a rolling 60 days, so the
-sample cannot grow past this. `intraday/sources/kite.py` documents what a Kite Connect
-adapter must handle; set `Config.source = "kite"` and nothing downstream changes.
+sample cannot grow past this.
+
+`intraday/sources/kite.py` is now a working Kite Connect adapter (~10 years of 5-minute
+history). It handles instrument-token lookup, the 100-day request cap, the 3 req/sec limit
+and the 06:00 IST token expiry. Credentials come from `KITE_API_KEY` and
+`KITE_ACCESS_TOKEN`; nothing is stored in the repo. Run `python -m intraday login` for the
+daily login steps.

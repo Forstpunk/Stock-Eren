@@ -92,10 +92,14 @@ def test_report_builds_from_project_artifacts(config: Config) -> None:
     render_report(report, console)
     text = console.export_text()
     for heading in (
-        "In four sentences", "Verdicts", "1. Data integrity", "2. Base rates",
-        "3. What separates a failed breakout", "4. Cost of trading it", "5. Caveats",
+        "THE SHORT VERSION", "In four sentences", "Verdicts", "1. Data integrity", "2. Base rates",
+        "3. What separates a failed breakout", "Cost of trading it", "Caveats",
     ):
         assert heading in text
+    if report.forecast is not None:
+        assert "4. Forecast" in text and "Calibration" in text
+        # a gated setup must never be reported from a stale artifact
+        assert ("failed_orb" not in report.backtests) or report.study.verdict == "signal"
     assert text.rstrip().endswith('"No edge detected" is a valid and useful result.')
     assert "orb" in report.setup_verdicts
     # the four sentences are numbered and come before any table

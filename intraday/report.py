@@ -21,6 +21,8 @@ from intraday.analysis import MIN_GAP_PCT, Study
 from intraday.backtest import BacktestSummary, load_backtest, render_backtest
 from intraday.config import IST, Config
 from intraday.features import FEATURE_MECHANISM
+from intraday.forecast import Score as ForecastScore
+from intraday.forecast import load_predictions, score as score_forecast
 from intraday.labelling import base_rates, load_breakouts
 from intraday.setups import SETUPS
 from intraday.setups.failed_orb import NAME as GATED_SETUP
@@ -36,6 +38,8 @@ CAVEATS = """Research output. Not advice, not a prediction, not a recommendation
 - "No edge detected" is a valid and useful result."""
 
 SetupVerdict = Literal["edge detected", "no edge", "insufficient sample"]
+
+MIN_CALIBRATION_BIN = 20  # a band with fewer rows than this is not worth quoting in prose
 
 
 class IntegritySummary(BaseModel):
@@ -67,6 +71,7 @@ class Report(BaseModel):
     n_sessions: int
     first_date: str
     last_date: str
+    forecast: ForecastScore | None  # None when the history is too short to forecast on
     money: dict[str, object] | None  # rupee summary of the first setup, None if it has no trades
     bottom_line: tuple[str, ...]
 
@@ -140,16 +145,23 @@ def build_report(config: Config) -> Report:
     study = Study.model_validate_json(study_path.read_text(encoding="utf-8"))
 
     backtests: dict[str, BacktestSummary] = {}
+    gate_closed = study.verdict != "signal"
     for name in SETUPS:
         p = data_dir / f"backtest_{name}.json"
+        if name == GATED_SETUP and gate_closed:
+            # A result left over from a run when the gate was open is not a current result.
+            continue
         if p.exists():
             backtests[name] = load_backtest(name, data_dir)
         elif name != GATED_SETUP:
             raise FileNotFoundError(f"{p} not found; run study first")
-    gate_closed = GATED_SETUP not in backtests and study.verdict != "signal"
 
     dates = sorted(breakouts["session_date"].astype(str).unique())
     verdicts_by_setup = {name: setup_verdict(s) for name, s in backtests.items()}
+    try:
+        forecast = score_forecast(load_predictions(data_dir), config)
+    except (FileNotFoundError, ValueError):
+        forecast = None
     money = _money_summary(backtests, data_dir, config)
     return Report(
         generated_at=datetime.now(tz=IST),
@@ -165,8 +177,9 @@ def build_report(config: Config) -> Report:
         n_sessions=len(dates),
         first_date=dates[0] if dates else "-",
         last_date=dates[-1] if dates else "-",
+        forecast=forecast,
         money=money,
-        bottom_line=_bottom_line(study, verdicts_by_setup, money),
+        bottom_line=_bottom_line(study, verdicts_by_setup, money, forecast),
     )
 
 
@@ -211,21 +224,33 @@ def _money_summary(
 
 
 def _bottom_line(
-    study: Study, verdicts: dict[str, SetupVerdict], money: dict[str, object] | None
+    study: Study, verdicts: dict[str, SetupVerdict], money: dict[str, object] | None,
+    forecast: ForecastScore | None,
 ) -> tuple[str, ...]:
     """Two or three sentences a reader can act on: what was found, and what it means."""
     lines: list[str] = []
     traded_badly = [n for n, v in verdicts.items() if v == "no edge"]
     if traded_badly:
         lines.append(f"This setup ({', '.join(traded_badly)}) lost money on this data, at every slippage level.")
-    if study.verdict == "signal":
+
+    # The forecast is the stronger evidence about predictability, so it speaks first.
+    if forecast is not None and forecast.verdict == "informative":
+        cost = f"Rs {money['mid']['cost']:,.0f}" if money else "the cost per trade"  # type: ignore[index]
+        lines.append(
+            "Failures ARE partly predictable: forecasts made before each session beat the base rate. "
+            f"The separation is just worth less than {cost} a round trip, so it does not become profit."
+        )
+    elif forecast is not None:
+        lines.append("Forecasts were made before each session and did not beat the base rate.")
+    elif study.verdict == "signal":
         held = ", ".join(f.feature for f in study.findings if f.holds)
         lines.append(f"{held} did separate the failures, but separating them is not the same as profiting from them.")
     elif study.verdict == "no_signal":
         lines.append("Nothing here tells you which breakouts to avoid: the warning signs did not work.")
     else:
         lines.append("There was not enough data to test the warning signs, so nothing is claimed about them.")
-    lines.append("Do not trade this on the strength of this report. It is a measurement, not a forecast.")
+
+    lines.append("Do not trade this on the strength of this report. It measures the past; it does not promise the future.")
     return tuple(lines)
 
 
@@ -405,13 +430,18 @@ def render_report(report: Report, console: Console) -> None:
     console.print("\n[bold]3. What separates a failed breakout[/bold]")
     render_study(report.study, console)
 
-    console.print("\n[bold]4. Cost of trading it[/bold]")
+    if report.forecast is not None:
+        console.print("\n[bold]4. Forecast: predictions made before the outcome, then scored[/bold]")
+        render_forecast(report.forecast, console)
+        console.print("\n[bold]5. Cost of trading it[/bold]")
+    else:
+        console.print("\n[bold]4. Cost of trading it[/bold]")
     for name, s in report.backtests.items():
         render_backtest(s, console)
     if report.gate_closed:
         console.print(f"\n  {GATED_SETUP}: not run - the gate is closed (verdict {report.study.verdict}).")
 
-    console.print("\n[bold]5. Caveats[/bold]")
+    console.print("\n[bold]6. Caveats[/bold]" if report.forecast is not None else "\n[bold]5. Caveats[/bold]")
     console.print(CAVEATS, markup=False, highlight=False)
 
 
@@ -514,8 +544,29 @@ def render_plain_answer(report: Report, console: Console) -> None:
         console.print()
 
     console.print("  [bold]Could you have known in advance which breakouts would fail?[/bold]")
+    fc = report.forecast
+    if fc is not None and fc.verdict == "informative":
+        console.print(
+            f"    A little. Forecasts made before each session, scored on {fc.n} of them, beat simply "
+            f"saying \"{report.base_overall['BUSTED_pct']:.0f}%\" every time."
+        )
+        solid = [b for b in fc.calibration if b.n >= MIN_CALIBRATION_BIN]
+        if len(solid) >= 2:
+            lo, hi = solid[0], solid[-1]
+            console.print(
+                f"    The ones it called safest failed {lo.observed_rate:.0%} of the time; the ones it "
+                f"called riskiest failed {hi.observed_rate:.0%}."
+            )
+        console.print("    That is real, and it is still not enough to cover costs - see below.")
+    elif fc is not None:
+        console.print(f"    No. Forecasts were made and scored on {fc.n} breakouts; they did not beat the base rate.")
+    else:
+        console.print("    Not yet - too little history to make and score a forecast.")
     any_held = any(f.holds for f in report.study.findings)
-    console.print(f"    {'Partly.' if any_held else 'No.'} Three warning signs were checked:")
+    console.print(
+        f"    {'Partly.' if any_held else 'Taken one at a time,'} the three warning signs were checked "
+        "separately, which is a harder test than the forecast above:"
+    )
     for f in report.study.findings:
         name = FEATURE_PLAIN_NAME.get(f.feature, f.feature)
         if not f.testable:
@@ -532,3 +583,29 @@ def render_plain_answer(report: Report, console: Console) -> None:
         console.print(f"    {line}")
     console.print()
     console.print("=" * 66)
+
+
+def render_forecast(score: ForecastScore, console: Console) -> None:
+    """How the forecasts were graded. Brier is mean squared error on the probability."""
+    console.print(
+        f"  {score.n} breakouts forecast before their session, {score.failures} of which failed. "
+        f"Each forecast used a rule built only on earlier sessions."
+    )
+    console.print(
+        f"  Brier score {score.brier:.4f} against {score.brier_base:.4f} for always quoting the base rate "
+        f"-> skill {score.skill:+.1%} (95% CI {score.skill_ci[0]:+.1%} to {score.skill_ci[1]:+.1%})."
+    )
+    table = Table(title="Calibration: what it said against what happened")
+    for col in ("forecast band", "n", "average forecast", "actually failed", "difference"):
+        table.add_column(col, justify="left" if col == "forecast band" else "right")
+    for b in score.calibration:
+        table.add_row(
+            f"{b.lower:.0%} - {b.upper:.0%}", str(b.n), f"{b.mean_forecast:.1%}",
+            f"{b.observed_rate:.1%}", f"{b.observed_rate - b.mean_forecast:+.1f} pp",
+        )
+    console.print(table)
+    console.print(
+        "  How to read: a well-calibrated forecast has 'actually failed' close to 'average forecast' in "
+        "every band, and a useful one has the bands far apart. Skill above zero means it beat the base rate."
+    )
+    console.print(f"  [bold]{score.statement}")
