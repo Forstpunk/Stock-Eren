@@ -2,7 +2,7 @@
 Expectancy: formula by hand, CI flag, InsufficientSampleError, segments."""
 from __future__ import annotations
 
-from datetime import date, time
+from datetime import date, time, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -136,7 +136,9 @@ def test_random_twin_rejects_empty_universe_day(universe, stores, config: Config
 def test_expectancy_formula_by_hand(config: Config) -> None:
     r = pd.Series([2.0] * 20 + [-1.0] * 20)
     m = pd.Series([2.5] * 20 + [0.2] * 20)
-    e = expectancy(r, m, "hand", config, seed=0)
+    # One trade per session, so the session bootstrap has 40 groups to draw from.
+    s = pd.Series([date(2026, 6, 1) + timedelta(days=k) for k in range(40)])
+    e = expectancy(r, m, s, "hand", config, seed=0)
     assert e.n == 40 and e.win_rate == 0.5
     assert e.avg_win_r == 2.0 and e.avg_loss_r == -1.0
     assert e.expectancy_r == pytest.approx(0.5 * 2.0 - 0.5 * 1.0)
@@ -148,13 +150,28 @@ def test_expectancy_formula_by_hand(config: Config) -> None:
 def test_expectancy_flags_zero_spanning_ci(config: Config) -> None:
     rng = np.random.default_rng(1)
     r = pd.Series(rng.normal(0.0, 1.0, 200))
-    e = expectancy(r, pd.Series(np.abs(r)), "noise", config, seed=0)
+    s = pd.Series([date(2026, 6, 1) + timedelta(days=k // 4) for k in range(200)])
+    e = expectancy(r, pd.Series(np.abs(r)), s, "noise", config, seed=0)
     assert e.indistinguishable_from_zero and "Indistinguishable" in e.statement
 
 
 def test_expectancy_raises_below_min_sample(config: Config) -> None:
+    s = pd.Series([date(2026, 6, 1) + timedelta(days=k) for k in range(29)])
     with pytest.raises(InsufficientSampleError, match="29 trades, below the minimum of 30"):
-        expectancy(pd.Series([1.0] * 29), pd.Series([1.0] * 29), "thin", config, seed=0)
+        expectancy(pd.Series([1.0] * 29), pd.Series([1.0] * 29), s, "thin", config, seed=0)
+
+
+def test_expectancy_interval_widens_when_trades_cluster_by_session(config: Config) -> None:
+    """The reason the bootstrap resamples sessions: same-day trades are not independent."""
+    rng = np.random.default_rng(5)
+    shocks = rng.normal(0.0, 0.6, 40)
+    r = pd.Series(np.concatenate([shocks[s] + rng.normal(0, 1.0, 10) for s in range(40)]))
+    m = pd.Series(np.abs(r))
+    spread = pd.Series([date(2026, 6, 1) + timedelta(days=k) for k in range(400)])
+    clustered = pd.Series(np.repeat([date(2026, 6, 1) + timedelta(days=s) for s in range(40)], 10))
+    wide = expectancy(r, m, clustered, "clustered", config, seed=0)
+    narrow = expectancy(r, m, spread, "one per session", config, seed=0)
+    assert (wide.ci_high - wide.ci_low) > (narrow.ci_high - narrow.ci_low)
 
 
 def test_segment_helpers(config: Config) -> None:

@@ -16,6 +16,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from intraday.config import Config
+from intraday.stats import mean_stat, session_bootstrap
 
 BREAKEVEN_R = 0.5  # a trade that never reaches +0.5R is a "failure" in Bulkowski's sense
 
@@ -44,11 +45,16 @@ class Expectancy(BaseModel):
     statement: str
 
 
-def expectancy(r_net: pd.Series, mfe_r: pd.Series, segment: str, config: Config, seed: int) -> Expectancy:
+def expectancy(
+    r_net: pd.Series, mfe_r: pd.Series, sessions: pd.Series, segment: str, config: Config, seed: int
+) -> Expectancy:
+    """``sessions`` is the session date per trade: the bootstrap resamples whole sessions,
+    because trades taken on the same day share that day's shock."""
     r = r_net.to_numpy(dtype="float64")
     m = mfe_r.to_numpy(dtype="float64")
-    if len(r) != len(m):
-        raise ValueError("r_net and mfe_r must be aligned")
+    s = np.asarray(sessions)
+    if not (len(r) == len(m) == len(s)):
+        raise ValueError("r_net, mfe_r and sessions must be aligned")
     if np.isnan(r).any() or np.isnan(m).any():
         raise ValueError(f"{segment}: NaN in trade results")
     n = len(r)
@@ -60,8 +66,7 @@ def expectancy(r_net: pd.Series, mfe_r: pd.Series, segment: str, config: Config,
     avg_loss = float(losses.mean()) if len(losses) else 0.0
     exp = win_rate * avg_win - (1 - win_rate) * abs(avg_loss)
     rng = np.random.default_rng(seed)
-    boots = np.array([r[rng.integers(0, n, n)].mean() for _ in range(config.bootstrap_n)])
-    lo, hi = float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5))
+    lo, hi, _ = session_bootstrap(s, mean_stat(r), config.bootstrap_n, rng)
     flat = lo <= 0 <= hi
     failure = float((m < BREAKEVEN_R).mean())
     statement = (
@@ -120,11 +125,15 @@ def segmented_expectancy(
     """(computed segments, skipped segments with their counts). One slippage level at a time."""
     if results["slippage_bps"].nunique() != 1:
         raise ValueError("segment one slippage level at a time")
+    if "session_date" not in results.columns:
+        raise ValueError("results must carry session_date so the bootstrap can resample sessions")
     computed: dict[str, Expectancy] = {}
     skipped: dict[str, int] = {}
     for key, g in results.groupby(by, sort=True):
         try:
-            computed[str(key)] = expectancy(g["r_net"], g["mfe_r"], str(key), config, seed)
+            computed[str(key)] = expectancy(
+                g["r_net"], g["mfe_r"], g["session_date"], str(key), config, seed
+            )
         except InsufficientSampleError as exc:
             skipped[str(key)] = exc.n
     return computed, skipped

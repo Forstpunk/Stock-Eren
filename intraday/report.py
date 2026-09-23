@@ -23,6 +23,7 @@ from intraday.config import IST, Config
 from intraday.features import FEATURE_MECHANISM
 from intraday.forecast import Score as ForecastScore
 from intraday.forecast import load_predictions, score as score_forecast
+from intraday.stats import effective_sample_size
 from intraday.labelling import base_rates, load_breakouts
 from intraday.setups import SETUPS
 from intraday.setups.failed_orb import NAME as GATED_SETUP
@@ -594,6 +595,13 @@ def render_forecast(score: ForecastScore, console: Console) -> None:
     console.print(
         f"  Brier score {score.brier:.4f} against {score.brier_base:.4f} for always quoting the base rate "
         f"-> skill {score.skill:+.1%} (95% CI {score.skill_ci[0]:+.1%} to {score.skill_ci[1]:+.1%})."
+    )
+    eff = effective_sample_size(score.n, score.n_sessions, score.session_variance_share)
+    console.print(
+        f"  Clustering: {score.session_variance_share:.1%} of the failure/no-failure variance is explained by "
+        f"which session it was. Across {score.n_sessions} sessions that makes {score.n} breakouts worth about "
+        f"{eff:.0f} independent ones, which is why the interval above resamples whole sessions rather than "
+        "individual breakouts."
     )
     table = Table(title="Calibration: what it said against what happened")
     for col in ("forecast band", "n", "average forecast", "actually failed", "difference"):

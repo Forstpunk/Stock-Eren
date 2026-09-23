@@ -24,7 +24,8 @@ def make_forecast(verdict: str = "informative"):  # type: ignore[no-untyped-def]
     from intraday.forecast import CalibrationBin, Score
 
     return Score(
-        n=408, failures=73, brier=0.1434, brier_base=0.1481, skill=0.032, skill_ci=(0.010, 0.051),
+        n=408, n_sessions=20, failures=73, session_variance_share=0.12,
+        brier=0.1434, brier_base=0.1481, skill=0.032, skill_ci=(0.010, 0.051),
         calibration=(
             CalibrationBin(lower=0.1, upper=0.2, n=228, mean_forecast=0.164, observed_rate=0.118),
             CalibrationBin(lower=0.2, upper=0.3, n=179, mean_forecast=0.236, observed_rate=0.257),

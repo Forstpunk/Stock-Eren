@@ -83,7 +83,8 @@ def run_backtest(
             df = segment_keys(results_frame(s), config)
             try:
                 overall: Expectancy | None = expectancy(
-                    df["r_net"], df["mfe_r"], f"{setup}/{variant} @ {bps}bps", config, config.benchmark_seed
+                    df["r_net"], df["mfe_r"], df["session_date"],
+                    f"{setup}/{variant} @ {bps}bps", config, config.benchmark_seed,
                 )
             except InsufficientSampleError:
                 overall = None

@@ -155,6 +155,7 @@ def test_brier_by_hand() -> None:
         "p_fail": [0.0, 1.0, 0.5, 0.5],
         "base_rate": [0.5, 0.5, 0.5, 0.5],
         "outcome": ["NEITHER", "BUSTED", "BUSTED", "NEITHER"],
+        "session_date": [date(2026, 6, d) for d in (1, 2, 3, 4)],
     })
     s = score(preds, Config(min_sample=1))
     assert s.brier == pytest.approx((0 + 0 + 0.25 + 0.25) / 4)
@@ -177,7 +178,25 @@ def test_thin_sample_is_not_graded(config: Config) -> None:
     preds = pd.DataFrame({
         "p_fail": [0.2] * 50, "base_rate": [0.2] * 50,
         "outcome": ["BUSTED"] * 5 + ["NEITHER"] * 45,
+        "session_date": [date(2026, 6, 1) + timedelta(days=k) for k in range(50)],
     })
     s = score(preds, config)
     assert s.verdict == "insufficient_sample"
     assert "cannot be graded" in s.statement
+
+
+def test_score_refuses_predictions_without_sessions(config: Config) -> None:
+    """Without session_date the bootstrap would silently fall back to iid resampling."""
+    preds = pd.DataFrame({
+        "p_fail": [0.2] * 50, "base_rate": [0.2] * 50,
+        "outcome": ["BUSTED"] * 25 + ["NEITHER"] * 25,
+    })
+    with pytest.raises(ValueError, match="session_date"):
+        score(preds, config)
+
+
+def test_score_reports_how_clustered_the_outcomes_are(config: Config) -> None:
+    preds = walk_forward(make_features(80, 20, signal=2.0, seed=12), config)
+    s = score(preds, config)
+    assert s.n_sessions > 0 and s.n_sessions < s.n
+    assert 0.0 <= s.session_variance_share <= 1.0

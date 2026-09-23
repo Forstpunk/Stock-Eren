@@ -34,6 +34,7 @@ from intraday.analysis import THIRD_NAMES
 from intraday.config import IST, Config
 from intraday.features import FEATURE_NAMES
 from intraday.labelling import Label
+from intraday.stats import session_bootstrap, session_variance_share
 
 PREDICTIONS_FILE = "predictions.parquet"
 MIN_TRAIN_FAILURES = 30  # the same floor used everywhere else
@@ -228,7 +229,9 @@ class Score(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     n: int
+    n_sessions: int
     failures: int
+    session_variance_share: float  # how much of the outcome is decided by the day itself
     brier: float  # mean squared error of the probability; lower is better
     brier_base: float  # the same for always forecasting the base rate
     skill: float  # 1 - brier/brier_base; positive means the forecast adds information
@@ -252,17 +255,21 @@ def score(predictions: pd.DataFrame, config: Config, seed: int = 0) -> Score:
     brier_base = float(np.mean((base - actual) ** 2))
     skill = float(1 - brier / brier_base) if brier_base > 0 else 0.0
 
-    # A skill score without an interval is the same mistake as an effect size without one.
-    rng = np.random.default_rng(seed)
-    boots = []
-    for _ in range(config.bootstrap_n):
-        idx = rng.integers(0, n, n)
+    # A skill score without an interval is the same mistake as an effect size without one,
+    # and an interval built by resampling rows would be far too narrow: breakouts on one
+    # session share that day's shock, so whole sessions are resampled instead.
+    if "session_date" not in predictions.columns:
+        raise ValueError("predictions must carry session_date so the bootstrap can resample sessions")
+    sessions = predictions["session_date"].astype(str).to_numpy()
+
+    def skill_stat(idx: np.ndarray) -> float:
         denom = float(np.mean((base[idx] - actual[idx]) ** 2))
-        if denom > 0:
-            boots.append(1 - float(np.mean((p[idx] - actual[idx]) ** 2)) / denom)
-    skill_ci = (
-        (float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5))) if boots else (0.0, 0.0)
-    )
+        return math.nan if denom <= 0 else 1 - float(np.mean((p[idx] - actual[idx]) ** 2)) / denom
+
+    rng = np.random.default_rng(seed)
+    skill_ci_lo, skill_ci_hi, _ = session_bootstrap(sessions, skill_stat, config.bootstrap_n, rng)
+    skill_ci = (skill_ci_lo, skill_ci_hi)
+    clustering = session_variance_share(actual, sessions)
 
     bins: list[CalibrationBin] = []
     for lo, hi in CALIBRATION_BINS:
@@ -296,8 +303,11 @@ def score(predictions: pd.DataFrame, config: Config, seed: int = 0) -> Score:
             f"against {brier_base:.4f}, skill {skill:+.1%} (95% CI {skill_ci[0]:+.1%} to {skill_ci[1]:+.1%}). "
             "The interval includes zero, so the apparent improvement is within noise. Use the base rate."
         )
-    return Score(n=n, failures=failures, brier=brier, brier_base=brier_base, skill=skill, skill_ci=skill_ci,
-                 calibration=tuple(bins), verdict=verdict, statement=statement)
+    return Score(
+        n=n, n_sessions=int(len(np.unique(sessions))), failures=failures,
+        session_variance_share=clustering, brier=brier, brier_base=brier_base,
+        skill=skill, skill_ci=skill_ci, calibration=tuple(bins), verdict=verdict, statement=statement,
+    )
 
 
 def save_predictions(df: pd.DataFrame, data_dir: Path) -> Path:

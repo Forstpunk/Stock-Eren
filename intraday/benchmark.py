@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict
 
 from intraday.config import Config
 from intraday.indicators import atr_prior_day
+from intraday.stats import mean_stat, session_bootstrap
 from intraday.store import BarStore
 from intraday.trades import Trade, TradeResult, evaluate
 from intraday.trading_calendar import TradingCalendar
@@ -141,10 +142,11 @@ def edge_vs_random(strategy: list[TradeResult], random: list[TradeResult], confi
     s = np.array([r.r_net for r in strategy])
     b = np.array([r.r_net for r in random])
     diff = s - b
+    # A pair belongs to the strategy trade's session; same-day pairs share that day's shock.
+    sessions = np.array([str(r.trade.session_date) for r in strategy])
     rng = np.random.default_rng(seed)
     n = len(diff)
-    boots = np.array([diff[rng.integers(0, n, n)].mean() for _ in range(config.bootstrap_n)])
-    lo, hi = float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5))
+    lo, hi, _ = session_bootstrap(sessions, mean_stat(diff), config.bootstrap_n, rng)
     edge = float(diff.mean())
     flat = lo <= 0 <= hi
     statement = (

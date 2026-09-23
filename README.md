@@ -91,6 +91,15 @@ the session has less time to resolve either way.
 - The failed-ORB setup (`failed_orb`) does not run unless the study verdict is `signal`.
   There is no override flag.
 
+## Changelog of definitions
+
+Research definitions are frozen; when one changes it is recorded here with the date and
+the reason, so a later result can never be quietly explained by a rule that moved.
+
+| date | change | reason |
+|---|---|---|
+| 2026-09-23 | **Bootstrap unit: trade → session.** Every confidence interval (forecast skill, edge vs random, expectancy) now resamples whole sessions rather than individual trades. | Breakouts on the same session share that day's market-wide shock. Resampling rows treats them as independent, which makes intervals far too narrow and can declare an edge that is not there. Measured on synthetic data with zero true effect and a realistic session shock, row resampling produced a false-positive rate well above the nominal 5%; session resampling stays near it. |
+
 ## Data-quality facts learned on yfinance (Sep 2026)
 
 - Yahoo rejects a 60-day span for 5m bars; 59 is the real cap, enforced before the network.
