@@ -202,3 +202,29 @@ def test_base_rates_table() -> None:
     assert overall.loc["all", "n"] == 4 and overall.loc["all", "NEITHER_pct"] == 50.0
     by_dir = base_rates(df, "direction")
     assert by_dir.loc["long", "BUSTED"] == 1 and by_dir.loc["short", "SUSTAINED"] == 0
+
+
+def test_breakout_depth_cannot_coexist_with_a_bust(config: Config) -> None:
+    """Why breakout_depth_atr is context, not a tested feature.
+
+    resolve() measures the excursion from the breakout bar onward, so the breakout bar's
+    own close counts. A close already beyond the bust threshold can never be labelled
+    BUSTED, which makes the feature a partial restatement of the label.
+    """
+    from intraday.features import CONTEXT_NAMES, FEATURE_NAMES
+
+    assert "breakout_depth_atr" in CONTEXT_NAMES
+    assert "breakout_depth_atr" not in FEATURE_NAMES
+
+    # OR is [99, 101], width 2, ATR 4 -> bust below 1.0, sustain at 2.0 beyond the boundary.
+    for depth_atr, close in ((0.30, 102.2), (0.60, 103.4)):
+        df = flat_session()
+        set_bar(df, 10, 100.5, close + 0.1, 100.4, close)  # deep close through the OR high
+        set_bar(df, 20, 99.5, 99.6, 98.0, 98.2)  # then straight back through the other side
+        events = label_session(df, "X", ATR, config)
+        long = next(e for e in events if e.direction == "long")
+        depth = abs(long.breakout_close - long.or_high) / ATR
+        assert depth == pytest.approx(depth_atr, abs=0.02)
+        assert long.label is not Label.BUSTED, (
+            f"a close {depth:.2f} ATR beyond the boundary was labelled BUSTED, which resolve() cannot do"
+        )

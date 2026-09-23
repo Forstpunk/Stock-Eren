@@ -146,9 +146,25 @@ so a positive value always means "in the direction of the breakout".
 | `index_or_agrees` | 1 if the index (`config.index_symbol`) has closed beyond its own opening range in the same direction at or before the breakout timestamp; 0 if not; NaN if index bars are missing | a breakout fighting the index is a breakout fighting every correlated seller | 1 → fails less |
 | `gap_atr_signed` | `gap_pct` converted to price terms ÷ prior-day ATR, signed by breakout direction (positive = gap in the breakout direction) | a gap in the breakout's direction means the move began before the session and has overnight commitment behind it | higher → fails less |
 | `prior_day_return_atr_signed` | (prior-day close − prior-day open) ÷ prior-day ATR, signed by breakout direction | continuation versus exhaustion — both stories are told, and neither is obviously right | **two-sided: report only** |
-| `breakout_depth_atr` | abs(breakout close − broken boundary) ÷ prior-day ATR | a decisive close through the level is harder to reclaim than a marginal one | higher → fails less |
+| ~~`breakout_depth_atr`~~ **WITHDRAWN** | abs(breakout close − broken boundary) ÷ prior-day ATR | ~~a decisive close through the level is harder to reclaim than a marginal one~~ | **moved to context, not tested — see note below** |
 | `is_expiry_day` | 1 if the session date is in `data/nse_expiries.csv`, else 0; NaN if the date is outside the file's covered range | expiry-day positioning and pinning distort intraday ranges | **two-sided: report only** |
 | `day_of_week` | 0–4 | segmentation only | not tested as a mechanism |
+
+### Withdrawn before interpretation: `breakout_depth_atr`
+
+Pre-registered above as directional, then withdrawn in code review on 2026-09-23 **before
+any result involving it was read**. The original entry is struck through rather than
+deleted, because a pre-registration that can be quietly edited is not a pre-registration.
+
+The reason it is unusable: `labelling.resolve` measures the excursion from the breakout
+bar onward, and the breakout bar's own close is part of that. So a breakout whose close
+already sits `bust_extension_atr` beyond the boundary can never be labelled BUSTED, and one
+at `sustain_extension_atr` beyond it is SUSTAINED on that bar. The feature is partly a
+restatement of the label rather than an independent signal about it. On the current data no
+BUSTED row has a depth above 0.18 against a threshold of 0.25, exactly as that implies.
+
+It is kept as a context column for segmentation, where being tied to the thresholds does no
+harm.
 
 **Two-sided features are shown in the report but can never on their own produce a
 `signal` verdict.** There is no honest direction to predict for them, so "it came out

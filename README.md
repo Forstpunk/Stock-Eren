@@ -69,7 +69,7 @@ research becomes storytelling.
 | ran (SUSTAINED) | extends >= 0.5 x prior-day ATR beyond the boundary | `config.sustain_extension_atr` |
 | failed (BUSTED) | never extends >= 0.25 ATR, then closes through the opposite boundary before 15:15 | `config.bust_extension_atr`, `bust_cutoff` |
 | neither | everything else, kept as its own class | |
-| features tested (directional) | opening-15m volume, breakout-bar volume, breakout-bar body, relative strength vs index, index breaking the same way, overnight gap, breakout depth | `features.FEATURE_NAMES` |
+| features tested (directional) | opening-15m volume, breakout-bar volume, breakout-bar body, relative strength vs index, index breaking the same way, overnight gap | `features.FEATURE_NAMES` |
 | features reported but two-sided | yesterday's move, expiry day | `features.REPORT_ONLY_NAMES` |
 | split | earliest 70% of dates / later 30% of dates | `analysis.TRAIN_FRACTION` |
 | gap to count as a finding | 10 points, in both periods | `analysis.MIN_GAP_PCT` |
@@ -101,6 +101,7 @@ the reason, so a later result can never be quietly explained by a rule that move
 
 | date | change | reason |
 |---|---|---|
+| 2026-09-23 | **`breakout_depth_atr` demoted to context: partly definitional; caught in code review before results were interpreted.** | `labelling.resolve` measures the move from the breakout bar onward, so the breakout bar's own excursion already counts towards the label. A close at depth ≥ `bust_extension_atr` can never be BUSTED, and one at depth ≥ `sustain_extension_atr` is SUSTAINED immediately. On the current data no BUSTED row exceeds depth 0.18 against a 0.25 threshold. Testing it would have measured the definition, not a mechanism. |
 | 2026-09-23 | **Forecast combination: average of bucket rates → shrunk log-odds.** | An average let a missing feature drag the prediction towards whatever the other features said, so an incomplete row silently changed scale. Under log-odds a missing feature contributes exactly zero. Shrinkage (k=40) stops a six-observation bucket being quoted as if it were evidence. Both parameters pre-registered in RESEARCH.md before implementation; the old method is kept and reported side by side. |
 | 2026-09-23 | **Three-outcome forecast added.** | "Will it fail?" throws away the difference between a breakout that runs and one that drifts, and those are not the same trade. Predictions now carry p_busted, p_sustained and p_neither, scored with the ranked probability score so being wrong by two steps costs more than by one. `p_fail` is now defined as the BUSTED share of that split. |
 | 2026-09-23 | **Random twin is now stopped.** | The benchmark twin had no stop, so its losses could run past −1R while the strategy's could not. That flattered the strategy by comparison. The twin now uses the same stop rule, capped at the matched duration. This makes reported edge vs random smaller, and correct. |

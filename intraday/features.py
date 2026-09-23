@@ -15,7 +15,6 @@ gap that holds in both periods is evidence.
     rel_strength_vs_index    moving on its own demand, not the market's tide
     index_or_agrees          the index broke its own range the same way
     gap_atr_signed           the move began overnight, in this direction
-    breakout_depth_atr       a decisive close through the level, not a marginal one
 
 REPORT_ONLY_NAMES - two-sided. Both stories are tellable, so there is no honest direction
 to predict and these can never on their own produce a signal verdict.
@@ -25,11 +24,19 @@ to predict and these can never on their own produce a signal verdict.
 
 CONTEXT_NAMES - segmentation only, never tested as mechanisms, because each is partly
 definitional: the outcome depends on the range width (a failure is a width-scaled
-distance) and on how much session is left to resolve in.
+distance), on how much session is left to resolve in, and - for breakout_depth_atr - on
+the labelling thresholds themselves.
 
     or_width_atr        opening range width in ATR units
     minutes_since_open  time of day
     day_of_week         0-4
+    breakout_depth_atr  how far the close sits beyond the broken boundary, in ATR
+
+breakout_depth_atr was pre-registered as directional and demoted in code review before any
+result was interpreted. ``labelling.resolve`` measures the move from the breakout bar
+onward, so the breakout bar's own excursion already counts: a close at depth >= the bust
+threshold can never be labelled BUSTED, and one at depth >= the sustain threshold is
+SUSTAINED on the spot. Testing it would measure the definition, not a mechanism.
 """
 from __future__ import annotations
 
@@ -66,13 +73,14 @@ FEATURE_NAMES: tuple[str, ...] = (
     "rel_strength_vs_index",
     "index_or_agrees",
     "gap_atr_signed",
-    "breakout_depth_atr",
 )
 
 # Pre-registered as two-sided: reported, never able to produce a signal verdict alone.
 REPORT_ONLY_NAMES: tuple[str, ...] = ("prior_day_return_atr_signed", "is_expiry_day")
 
-CONTEXT_NAMES: tuple[str, ...] = ("or_width_atr", "minutes_since_open", "day_of_week")
+CONTEXT_NAMES: tuple[str, ...] = (
+    "or_width_atr", "minutes_since_open", "day_of_week", "breakout_depth_atr",
+)
 
 TESTED_NAMES: tuple[str, ...] = FEATURE_NAMES + REPORT_ONLY_NAMES
 ALL_COLUMNS: tuple[str, ...] = FEATURE_NAMES + REPORT_ONLY_NAMES + CONTEXT_NAMES
@@ -84,7 +92,7 @@ FEATURE_MECHANISM: dict[str, str] = {
     "rel_strength_vs_index": "moving on its own demand, not the market's tide",
     "index_or_agrees": "the index broke its own range the same way",
     "gap_atr_signed": "the move began overnight, in this direction",
-    "breakout_depth_atr": "a decisive close through the level, not a marginal one",
+    "breakout_depth_atr": "how far beyond the boundary the close sat (context only)",
     "prior_day_return_atr_signed": "continuation or exhaustion (two-sided)",
     "is_expiry_day": "expiry positioning distorts ranges (two-sided)",
 }
@@ -97,7 +105,7 @@ FEATURE_EXPECTATION: dict[str, str] = {
     "rel_strength_vs_index": "breakouts lagging the index should fail more often",
     "index_or_agrees": "breakouts fighting the index should fail more often",
     "gap_atr_signed": "breakouts against the overnight gap should fail more often",
-    "breakout_depth_atr": "marginal closes through the level should fail more often",
+    "breakout_depth_atr": "no direction tested; partly fixed by the labelling thresholds",
     "prior_day_return_atr_signed": "no direction predicted; reported only",
     "is_expiry_day": "no direction predicted; reported only",
 }
