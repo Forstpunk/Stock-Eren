@@ -131,3 +131,38 @@ def test_effective_sample_size_shrinks_with_clustering() -> None:
     assert effective_sample_size(800, 40, 1.0) == pytest.approx(40)
     middling = effective_sample_size(800, 40, 0.25)
     assert 40 < middling < 800
+
+
+def test_paired_statistics_may_narrow_and_that_is_correct() -> None:
+    """Session resampling widens a level statistic but can tighten a paired comparison.
+
+    Two forecasts are scored on the same rows. The day sets the overall level (so the mean
+    outcome is clustered), while the improvement one forecast makes over the other is
+    steady across days. Mixing rows from different days, as an iid bootstrap does, breaks
+    that pairing and adds noise the comparison does not actually have.
+    """
+    rng = np.random.default_rng(3)
+    shocks = rng.normal(0.0, 1.5, N_SESSIONS)  # the day decides the level
+    outcome = np.concatenate([shocks[s] + rng.normal(0, 0.3, PER_SESSION) for s in range(N_SESSIONS)])
+    sessions = np.repeat(np.arange(N_SESSIONS), PER_SESSION)
+    good = outcome - 0.1  # a steady improvement, identical on every day
+    naive = outcome - 0.0
+
+    level = mean_stat(outcome)
+    paired = mean_stat(np.abs(naive - outcome) - np.abs(good - outcome))
+
+    lo_s, hi_s, _ = session_bootstrap(sessions, level, 600, np.random.default_rng(0))
+    lo_p, hi_p, _ = session_bootstrap(sessions, paired, 600, np.random.default_rng(0))
+    r = np.random.default_rng(0)
+    n = len(outcome)
+    iid_level = np.array([outcome[r.integers(0, n, n)].mean() for _ in range(600)])
+    diff = np.abs(naive - outcome) - np.abs(good - outcome)
+    r = np.random.default_rng(0)
+    iid_paired = np.array([diff[r.integers(0, n, n)].mean() for _ in range(600)])
+
+    iid_level_width = np.percentile(iid_level, 97.5) - np.percentile(iid_level, 2.5)
+    iid_paired_width = np.percentile(iid_paired, 97.5) - np.percentile(iid_paired, 2.5)
+    assert (hi_s - lo_s) > iid_level_width, "a clustered level statistic must get a wider interval"
+    assert (hi_p - lo_p) == pytest.approx(iid_paired_width, abs=0.02), (
+        "an unclustered paired statistic should not be inflated by session resampling"
+    )

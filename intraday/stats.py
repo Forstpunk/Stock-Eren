@@ -10,6 +10,13 @@ and applies the statistic to that index. A draw whose statistic is undefined (an
 denominator, a single class) is skipped; if more than half the draws are undefined the
 sample is too thin to bootstrap and the function raises rather than quoting an interval
 built from the remainder.
+
+One result that looks wrong and is not: resampling sessions widens the interval for a
+LEVEL statistic (a mean, a rate) because clustered rows carry less information than their
+count suggests, but it can NARROW the interval for a PAIRED statistic - a skill score
+comparing two forecasts on the same rows - because keeping a session's rows together
+preserves the pairing instead of mixing regimes. That is the same reason a paired t-test
+is tighter than an unpaired one, and both directions are pinned by tests below.
 """
 from __future__ import annotations
 
