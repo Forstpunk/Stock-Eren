@@ -13,8 +13,16 @@ insufficient sample. It never emits buy signals, ratings, price targets or stock
 ```
 
 Two commands. `update` takes a few minutes (it downloads); `study` takes a few more (it
-bootstraps confidence intervals). `study --summary` prints only the plain-language
-conclusion; `study --quiet` writes `data/report.txt` without printing anything.
+bootstraps confidence intervals).
+
+For the answer in rupees and plain questions, with no statistics at all:
+
+```
+.venv/Scripts/python -m intraday study --plain
+```
+
+`--summary` gives the verdict with a short explanation; `--quiet` writes
+`data/report.txt` without printing. The full `report.txt` always contains everything.
 
 Use `.venv/Scripts/python`, not bare `python` — the system interpreter has no packages.
 

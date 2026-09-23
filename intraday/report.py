@@ -64,6 +64,11 @@ class Report(BaseModel):
     backtests: dict[str, BacktestSummary]
     setup_verdicts: dict[str, SetupVerdict]
     gate_closed: bool
+    n_sessions: int
+    first_date: str
+    last_date: str
+    money: dict[str, object] | None  # rupee summary of the first setup, None if it has no trades
+    bottom_line: tuple[str, ...]
 
 
 # ---- pieces ---------------------------------------------------------------------------
@@ -143,6 +148,9 @@ def build_report(config: Config) -> Report:
             raise FileNotFoundError(f"{p} not found; run study first")
     gate_closed = GATED_SETUP not in backtests and study.verdict != "signal"
 
+    dates = sorted(breakouts["session_date"].astype(str).unique())
+    verdicts_by_setup = {name: setup_verdict(s) for name, s in backtests.items()}
+    money = _money_summary(backtests, data_dir, config)
     return Report(
         generated_at=datetime.now(tz=IST),
         config=json.loads(config.model_dump_json()),
@@ -152,9 +160,73 @@ def build_report(config: Config) -> Report:
         base_by_month={m: _rates(g) for m, g in by_month.groupby("month")},
         study=study,
         backtests=backtests,
-        setup_verdicts={name: setup_verdict(s) for name, s in backtests.items()},
+        setup_verdicts=verdicts_by_setup,
         gate_closed=gate_closed,
+        n_sessions=len(dates),
+        first_date=dates[0] if dates else "-",
+        last_date=dates[-1] if dates else "-",
+        money=money,
+        bottom_line=_bottom_line(study, verdicts_by_setup, money),
     )
+
+
+def _money_summary(
+    backtests: dict[str, BacktestSummary], data_dir: Path, config: Config
+) -> dict[str, object] | None:
+    """Per-trade and total rupees for the first setup, read from its results table."""
+    if not backtests:
+        return None
+    name = next(iter(backtests))
+    path = data_dir / f"backtest_{name}.parquet"
+    if not path.exists():
+        return None
+    table = pd.read_parquet(path)
+    base = table[(table["role"] == "strategy") & (table["variant"] == "base")]
+    twins = table[(table["role"] == "random") & (table["variant"] == "base")]
+    if base.empty:
+        return None
+    rows = []
+    for bps in sorted(base["slippage_bps"].unique()):
+        g = base[base["slippage_bps"] == bps]
+        rows.append({"bps": int(bps), "per_trade": float(g["net_pnl"].mean()), "total": float(g["net_pnl"].sum())})
+    mid_bps = int(sorted(base["slippage_bps"].unique())[len(rows) // 2])
+    g = base[base["slippage_bps"] == mid_bps]
+    t = twins[twins["slippage_bps"] == mid_bps]
+    edge = next(
+        (v.edge for v in backtests[name].variants if v.variant == "base" and v.slippage_bps == mid_bps), None
+    )
+    return {
+        "setup": name,
+        "position": float(config.position_inr),
+        "n_trades": int(len(g)),
+        "by_slippage": rows,
+        "mid": {
+            "bps": mid_bps,
+            "wins_in_ten": round(float((g["net_pnl"] > 0).mean()) * 10),
+            "cost": float(g["cost_total"].mean()),
+            "random": float(t["net_pnl"].mean()) if not t.empty else 0.0,
+            "same_as_random": bool(edge.indistinguishable_from_zero) if edge else False,
+        },
+    }
+
+
+def _bottom_line(
+    study: Study, verdicts: dict[str, SetupVerdict], money: dict[str, object] | None
+) -> tuple[str, ...]:
+    """Two or three sentences a reader can act on: what was found, and what it means."""
+    lines: list[str] = []
+    traded_badly = [n for n, v in verdicts.items() if v == "no edge"]
+    if traded_badly:
+        lines.append(f"This setup ({', '.join(traded_badly)}) lost money on this data, at every slippage level.")
+    if study.verdict == "signal":
+        held = ", ".join(f.feature for f in study.findings if f.holds)
+        lines.append(f"{held} did separate the failures, but separating them is not the same as profiting from them.")
+    elif study.verdict == "no_signal":
+        lines.append("Nothing here tells you which breakouts to avoid: the warning signs did not work.")
+    else:
+        lines.append("There was not enough data to test the warning signs, so nothing is claimed about them.")
+    lines.append("Do not trade this on the strength of this report. It is a measurement, not a forecast.")
+    return tuple(lines)
 
 
 # ---- render ------------------------------------------------------------------------------
@@ -286,6 +358,7 @@ def render_report(report: Report, console: Console) -> None:
         f"stop {c['stop_atr_multiple']} ATR | position Rs {c['position_inr']:,.0f}"
     )
 
+    render_plain_answer(report, console)
     render_plain_summary(report.study, console, int(c["min_sample"]))
     console.print("[dim]Detail below - for auditing the result above.[/dim]")
 
@@ -380,3 +453,82 @@ def save_report_text(console: Console, data_dir: Path) -> Path:
     path = data_dir / "report.txt"
     path.write_text(console.export_text(), encoding="utf-8")
     return path
+
+
+# ---- the short version ---------------------------------------------------------------
+
+FEATURE_PLAIN_NAME: dict[str, str] = {
+    "rvol_open_15m": "quiet first 15 minutes",
+    "rvol_breakout_bar": "thin volume on the breakout bar",
+    "bar_body_ratio": "small candle body (price stalling)",
+}
+
+
+def render_plain_answer(report: Report, console: Console) -> None:
+    """The whole result in rupees and plain questions, for a reader who wants the answer
+    and not the statistics. Everything here is also in the tables below."""
+    i = report.integrity
+    o = report.base_overall
+    money = report.money
+    n = int(o["n"])
+
+    console.print("=" * 66)
+    console.print("  [bold]THE SHORT VERSION[/bold]")
+    console.print("=" * 66)
+    console.print()
+    console.print("  [bold]Question:[/bold]  Do opening-range breakouts make money on these stocks?")
+    verdict = "No." if all(v == "no edge" for v in report.setup_verdicts.values()) else "See below."
+    console.print(f"  [bold]Answer:[/bold]    [bold]{verdict}[/bold]")
+    console.print()
+
+    console.print("  [bold]What was tested[/bold]")
+    console.print(f"    {i.symbols} NSE stocks, {report.n_sessions} trading days ({report.first_date} to {report.last_date})")
+    console.print(f"    {n} breakouts found" + (f", {money['n_trades']} of them tradeable" if money else ""))
+    console.print()
+
+    console.print(f"  [bold]What happened to those {n} breakouts[/bold]")
+    counts = {
+        "failed": (o["BUSTED_pct"], "reversed back through the range"),
+        "ran": (o["SUSTAINED_pct"], "went the distance"),
+        "neither": (o["NEITHER_pct"], "drifted, resolved neither way"),
+    }
+    for label, (pct, meaning) in counts.items():
+        console.print(f"    {round(n * pct / 100):4d}  {label:<8}({pct:.0f}%)".ljust(26) + f"- {meaning}")
+    console.print()
+
+    if money:
+        console.print(f"  [bold]If you had traded all {money['n_trades']} with Rs {money['position']:,.0f} a time[/bold]")
+        for row in money["by_slippage"]:
+            console.print(
+                f"    at {row['bps']:2d} bps slippage:   Rs {row['per_trade']:>5,.0f} per trade"
+                f"      Rs {row['total']:>9,.0f} in total"
+            )
+        mid = money["mid"]
+        console.print()
+        console.print(f"    {mid['wins_in_ten']} trades in 10 made money.")
+        console.print(f"    Costs alone were Rs {mid['cost']:,.0f} per trade at {mid['bps']} bps.")
+        console.print(
+            f"    Entering at random times instead lost Rs {abs(mid['random']):,.0f} - "
+            + ("the same." if mid["same_as_random"] else "different.")
+        )
+        console.print()
+
+    console.print("  [bold]Could you have known in advance which breakouts would fail?[/bold]")
+    any_held = any(f.holds for f in report.study.findings)
+    console.print(f"    {'Partly.' if any_held else 'No.'} Three warning signs were checked:")
+    for f in report.study.findings:
+        name = FEATURE_PLAIN_NAME.get(f.feature, f.feature)
+        if not f.testable:
+            outcome = "not enough data to judge"
+        elif f.holds:
+            outcome = "worked - see the tables below"
+        else:
+            outcome = "checked, did not work"
+        console.print(f"      {name:<34} - {outcome}")
+    console.print()
+
+    console.print("  [bold]So:[/bold]")
+    for line in report.bottom_line:
+        console.print(f"    {line}")
+    console.print()
+    console.print("=" * 66)

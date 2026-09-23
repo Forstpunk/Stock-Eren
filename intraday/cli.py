@@ -48,7 +48,7 @@ def cmd_study(args: argparse.Namespace, config: Config) -> int:
     from intraday.backtest import run_backtest, save_backtest
     from intraday.features import build_feature_table, save_features
     from intraday.labelling import label_universe, save_breakouts
-    from intraday.report import build_report, render_plain_summary, render_report, save_report_text
+    from intraday.report import build_report, render_plain_answer, render_plain_summary, render_report, save_report_text
     from intraday.setups import SETUPS
     from intraday.setups.failed_orb import GateClosedError
     from intraday.setups.failed_orb import NAME as GATED_SETUP
@@ -92,7 +92,9 @@ def cmd_study(args: argparse.Namespace, config: Config) -> int:
     path = save_report_text(report_console, config.data_dir)
     console.print(f"\nreport saved -> {path}")
     if not args.quiet:
-        if args.summary:
+        if args.plain:
+            render_plain_answer(full_report, console)
+        elif args.summary:
             render_plain_summary(full_report.study, console, config.min_sample)
         else:
             console.print(report_console.export_text(), markup=False, highlight=False)
@@ -127,6 +129,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     study.add_argument("--width", type=int, default=150, help="report width in characters")
     study.add_argument("--quiet", action="store_true", help="write the report file without printing it")
+    study.add_argument(
+        "--plain", action="store_true",
+        help="print only the short version: the answer in rupees and plain questions, no statistics",
+    )
     study.add_argument(
         "--summary", action="store_true",
         help="print only the plain-language conclusion and verdict, no tables (report.txt stays complete)",
