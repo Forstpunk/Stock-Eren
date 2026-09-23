@@ -10,13 +10,13 @@ import pytest
 
 from intraday.analysis import MIN_GAP_PCT, bust_rate_by_third, run_study, split_date_at
 from intraday.config import Config
-from intraday.features import FEATURE_NAMES
+from intraday.features import FEATURE_NAMES, REPORT_ONLY_NAMES, TESTED_NAMES
 
 
 def table(values: list[float], labels: list[str], dates: list[date] | None = None) -> pd.DataFrame:
     n = len(values)
     days = dates or [date(2026, 6, 1) + timedelta(days=k // 6) for k in range(n)]
-    df = pd.DataFrame({f: np.linspace(0, 1, n) for f in FEATURE_NAMES})
+    df = pd.DataFrame({f: np.linspace(0, 1, n) for f in TESTED_NAMES})
     df["rvol_open_15m"] = values
     df["label"] = labels
     df["session_date"] = days
@@ -59,7 +59,7 @@ def planted(n: int, gap: float, seed: int, bust_rate: float = 0.25) -> pd.DataFr
     """Busts get systematically lower rvol_open_15m; ``gap`` sets how much lower."""
     rng = np.random.default_rng(seed)
     is_bust = rng.random(n) < bust_rate
-    df = pd.DataFrame({f: rng.normal(size=n) for f in FEATURE_NAMES})
+    df = pd.DataFrame({f: rng.normal(size=n) for f in TESTED_NAMES})
     df["rvol_open_15m"] = rng.normal(size=n) - gap * is_bust
     df["label"] = np.where(is_bust, "BUSTED", np.where(rng.random(n) < 0.4, "SUSTAINED", "NEITHER"))
     df["session_date"] = [date(2026, 6, 1) + timedelta(days=k // 8) for k in range(n)]

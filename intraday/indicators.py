@@ -218,3 +218,48 @@ def atr(daily: pd.DataFrame, i: int, period: int) -> float:
     for x in tr[period:]:
         value = (value * (period - 1) + float(x)) / period
     return value
+
+
+# ---- index alignment ------------------------------------------------------------------
+
+
+def index_bar_at(index_bars: pd.DataFrame, ts: pd.Timestamp) -> pd.Series | None:
+    """The index bar stamped exactly ``ts``, or None.
+
+    Exact match only. A nearest-neighbour lookup would quietly compare a stock bar against
+    an index bar from a different minute, which is a small lie that compounds.
+    """
+    if index_bars.empty or ts not in index_bars.index:
+        return None
+    row = index_bars.loc[ts]
+    return row.iloc[0] if isinstance(row, pd.DataFrame) else row
+
+
+def index_session_open(index_bars: pd.DataFrame, session_date: date) -> float:
+    """Open of the index's first bar of ``session_date``. NaN if the session is absent."""
+    same_day = index_bars[index_bars.index.date == session_date]
+    return math.nan if same_day.empty else float(same_day["open"].iloc[0])
+
+
+def index_breakout_state(index_bars: pd.DataFrame, ts: pd.Timestamp, config: Config) -> int | float:
+    """Which way the index has broken its own opening range at or before ``ts``.
+
+    Returns +1 for an upward break, -1 for a downward break, 0 for neither, and NaN when
+    the index has no bars for that session or no complete opening range. Uses only index
+    bars at or before ``ts``, so it is as blind to the future as the stock features are.
+    """
+    from intraday.labelling import detect_breakout_at
+
+    same_day = index_bars[index_bars.index.date == ts.date()]
+    same_day = same_day[same_day.index <= ts]
+    if same_day.empty:
+        return math.nan
+    try:
+        opening_range(same_day, len(same_day) - 1, config)
+    except (ValueError, IndexError):
+        return math.nan  # range not complete yet, or the session does not start on the grid
+    for k in range(config.opening_range_bars, len(same_day)):
+        direction = detect_breakout_at(same_day, k, config)
+        if direction is not None:
+            return 1 if direction == "long" else -1
+    return 0

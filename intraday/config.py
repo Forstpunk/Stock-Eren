@@ -44,7 +44,8 @@ class Config(BaseModel):
     daily_history_days: int = Field(default=200, gt=0)
 
     # Indicators
-    rvol_lookback_sessions: int = Field(default=20, gt=0)
+    # 14 per Zarattini & Aziz (RESEARCH.md); changed from 20 on 2026-09-23, see README changelog.
+    rvol_lookback_sessions: int = Field(default=14, gt=0)
     atr_period: int = Field(default=14, gt=0)
 
     # Trades, benchmark, expectancy

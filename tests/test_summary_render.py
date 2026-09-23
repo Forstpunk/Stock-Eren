@@ -31,7 +31,9 @@ def _table(feature: str, scope: str, low: float, high: float, base: float = 20.0
     return FeatureTable(feature=feature, scope=scope, n=300, busts=int(base * 3), base_rate_pct=base, thirds=thirds)
 
 
-def _finding(feature: str, low: float, high: float, holds: bool, testable: bool = True) -> FeatureFinding:
+def _finding(
+    feature: str, low: float, high: float, holds: bool, testable: bool = True, two_sided: bool = False
+) -> FeatureFinding:
     return FeatureFinding(
         feature=feature,
         overall=_table(feature, "all", low, high),
@@ -39,6 +41,7 @@ def _finding(feature: str, low: float, high: float, holds: bool, testable: bool 
         second_half=_table(feature, "second half", low, high),
         testable=testable,
         holds=holds,
+        two_sided=two_sided,
         statement=f"{feature}: low third fails {low:.1f}%, high third {high:.1f}%.",
     )
 
@@ -46,10 +49,9 @@ def _finding(feature: str, low: float, high: float, holds: bool, testable: bool 
 def make_study(verdict: Verdict, second_half_busts: int = 52) -> Study:
     """A Study with the shape each verdict actually produces."""
     if verdict == "signal":
-        findings = (
-            _finding(FEATURE_NAMES[0], 35.0, 10.0, holds=True),
-            _finding(FEATURE_NAMES[1], 28.0, 14.0, holds=False),
-            _finding(FEATURE_NAMES[2], 21.0, 19.0, holds=False),
+        findings = tuple(
+            _finding(f, 35.0, 10.0, holds=True) if k == 0 else _finding(f, 21.0, 19.0, holds=False)
+            for k, f in enumerate(FEATURE_NAMES)
         )
         statement = f"SIGNAL: {FEATURE_NAMES[0]} separates failed breakouts by at least {MIN_GAP_PCT:.0f} points."
     elif verdict == "no_signal":
@@ -61,7 +63,8 @@ def make_study(verdict: Verdict, second_half_busts: int = 52) -> Study:
         statement = f"INSUFFICIENT SAMPLE: no feature has enough failures in both halves ({second_half_busts})."
     return Study(
         n_breakouts=840, base_rate_pct=20.0, split_date=date(2026, 9, 2),
-        second_half_busts=second_half_busts, min_half_busts=30, findings=findings,
+        second_half_busts=second_half_busts, min_half_busts=30,
+        n_tested=len(FEATURE_NAMES), n_directional=len(FEATURE_NAMES), findings=findings,
         verdict=verdict, statement=statement,
     )
 
@@ -93,7 +96,11 @@ def test_no_signal_says_not_to_trade_the_setup() -> None:
 def test_insufficient_sample_reports_the_shortfall_not_a_score() -> None:
     text = render(make_study("insufficient_sample", second_half_busts=7), min_sample=30)
     assert "30 failed breakouts in both halves" in text
-    assert all(f in text for f in FEATURE_NAMES), "each feature's shortfall must be shown"
+    # The summary stays short, so it names the worst few and points at the tables for the rest.
+    from intraday.features import FEATURE_PLAIN
+    named = [f for f in FEATURE_NAMES if FEATURE_PLAIN.get(f, f) in text]
+    assert named, "the thinnest features' shortfalls must be shown"
+    assert "in the tables below" in text or len(named) == len(FEATURE_NAMES)
     # No AUC, and no other single summary score dressed up as a finding.
     assert "auc" not in text.lower()
     assert not re.search(r"0\.\d\d", text), f"summary quotes a score-like figure:\n{text}"

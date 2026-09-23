@@ -68,8 +68,9 @@ research becomes storytelling.
 | ran (SUSTAINED) | extends >= 0.5 x prior-day ATR beyond the boundary | `config.sustain_extension_atr` |
 | failed (BUSTED) | never extends >= 0.25 ATR, then closes through the opposite boundary before 15:15 | `config.bust_extension_atr`, `bust_cutoff` |
 | neither | everything else, kept as its own class | |
-| features tested | opening-15m volume, breakout-bar volume, breakout-bar body | `features.FEATURE_NAMES` |
-| gap to count as a finding | 10 points, in both halves | `analysis.MIN_GAP_PCT` |
+| features tested (directional) | opening-15m volume, breakout-bar volume, breakout-bar body, relative strength vs index, index breaking the same way, overnight gap, breakout depth | `features.FEATURE_NAMES` |
+| features reported but two-sided | yesterday's move, expiry day | `features.REPORT_ONLY_NAMES` |
+| gap to count as a finding | 10 points, in both periods | `analysis.MIN_GAP_PCT` |
 | failures needed to test a feature | 30 in each half, where the feature exists | `config.min_sample` |
 | stop | 1.0 x prior-day ATR | `config.stop_atr_multiple` |
 | position | Rs 50,000 | `config.position_inr` |
@@ -98,6 +99,7 @@ the reason, so a later result can never be quietly explained by a rule that move
 
 | date | change | reason |
 |---|---|---|
+| 2026-09-23 | **RVOL lookback: 20 → 14 sessions.** | Taken from Zarattini & Aziz, who define relative volume against the previous 14 days, and pre-registered in RESEARCH.md before implementation. Not chosen from our results. It also lifts the rows where RVOL exists from 347 of 840 to 493, which is what made the feature testable in both periods at all. |
 | 2026-09-23 | **Bootstrap unit: trade → session.** Every confidence interval (forecast skill, edge vs random, expectancy) now resamples whole sessions rather than individual trades. | Breakouts on the same session share that day's market-wide shock. Resampling rows treats them as independent, which makes intervals far too narrow and can declare an edge that is not there. Measured on synthetic data with zero true effect and a realistic session shock, row resampling produced a false-positive rate well above the nominal 5%; session resampling stays near it. |
 
 ## Data-quality facts learned on yfinance (Sep 2026)

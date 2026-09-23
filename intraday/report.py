@@ -20,7 +20,7 @@ from rich.table import Table
 from intraday.analysis import MIN_GAP_PCT, Study
 from intraday.backtest import BacktestSummary, load_backtest, render_backtest
 from intraday.config import IST, Config
-from intraday.features import FEATURE_MECHANISM
+from intraday.features import FEATURE_MECHANISM, FEATURE_PLAIN
 from intraday.forecast import Score as ForecastScore
 from intraday.forecast import load_predictions, score as score_forecast
 from intraday.stats import effective_sample_size
@@ -41,6 +41,7 @@ CAVEATS = """Research output. Not advice, not a prediction, not a recommendation
 SetupVerdict = Literal["edge detected", "no edge", "insufficient sample"]
 
 MIN_CALIBRATION_BIN = 20  # a band with fewer rows than this is not worth quoting in prose
+SUMMARY_FEATURE_LINES = 4  # the short version stays short; the rest are in the tables
 
 
 class IntegritySummary(BaseModel):
@@ -272,7 +273,7 @@ def _headline(report: Report) -> list[str]:
     ]
     # Lead with a feature the study could actually test. An untestable feature can show a
     # huge gap on a handful of failures, and putting that first would sell a non-finding.
-    testable = [f for f in report.study.findings if f.testable]
+    testable = [f for f in report.study.findings if f.testable and f.overall is not None]
     if testable:
         best = max(testable, key=lambda f: f.overall.gap_pct)
         lo, hi = best.overall.thirds[0], best.overall.thirds[-1]
@@ -320,13 +321,19 @@ def render_plain_summary(study: Study, console: Console, min_sample: int) -> Non
     if study.verdict == "insufficient_sample":
         console.print(f"[bold {colour}]Not enough data to answer the question yet.[/bold {colour}]")
         console.print(
-            f"  No feature has {min_sample} failed breakouts in both halves of the period, so none could be "
-            "tested either way. Failures per half, where each feature exists:"
+            f"  None of the {len(study.findings)} features has {min_sample} failed breakouts in both halves "
+            "of the period, so none could be tested either way. Failures per half, worst first:"
         )
-        for f in study.findings:
+        thinnest = sorted(
+            study.findings,
+            key=lambda f: min(f.first_half.busts if f.first_half else 0, f.second_half.busts if f.second_half else 0),
+        )
+        for f in thinnest[:SUMMARY_FEATURE_LINES]:
             first = f.first_half.busts if f.first_half else 0
             second = f.second_half.busts if f.second_half else 0
-            console.print(f"    {f.feature}: {first} then {second}")
+            console.print(f"    {FEATURE_PLAIN.get(f.feature, f.feature)}: {first} then {second}")
+        if len(thinnest) > SUMMARY_FEATURE_LINES:
+            console.print(f"    ... and {len(thinnest) - SUMMARY_FEATURE_LINES} more, all in the tables below")
         console.print("  Collect more sessions, then run this again.")
         console.print("  The tables below describe what happened. They are not evidence of what happens next.")
     elif study.verdict == "no_signal":
@@ -358,7 +365,8 @@ def render_plain_summary(study: Study, console: Console, min_sample: int) -> Non
             f"chosen on."
         )
         console.print("  Strongest separation first:")
-        for f in sorted(study.findings, key=lambda f: -abs(f.overall.gap_pct))[:3]:
+        measurable = [f for f in study.findings if f.overall is not None]
+        for f in sorted(measurable, key=lambda f: -abs(f.overall.gap_pct))[:3]:
             lo, hi = f.overall.thirds[0], f.overall.thirds[-1]
             direction = "lower" if f.overall.gap_pct > 0 else "higher"
             console.print(
@@ -453,7 +461,11 @@ def render_study(study: Study, console: Console) -> None:
            if study.split_date else "Too few dates to split into halves.")
     )
     for f in study.findings:
-        t = Table(title=f"{f.feature} - {FEATURE_MECHANISM[f.feature]}")
+        if f.overall is None:
+            console.print(f"  [red]{f.statement}")
+            continue
+        label = FEATURE_MECHANISM.get(f.feature, f.feature)
+        t = Table(title=f"{f.feature} - {label}" + ("  [two-sided: reported only]" if f.two_sided else ""))
         for col in ("rows", "third", "range", "n", "failed", "fail rate", "vs overall"):
             t.add_column(col, justify="left" if col in ("rows", "third", "range") else "right")
         for table in (f.overall, f.first_half, f.second_half):
@@ -488,11 +500,7 @@ def save_report_text(console: Console, data_dir: Path) -> Path:
 
 # ---- the short version ---------------------------------------------------------------
 
-FEATURE_PLAIN_NAME: dict[str, str] = {
-    "rvol_open_15m": "quiet first 15 minutes",
-    "rvol_breakout_bar": "thin volume on the breakout bar",
-    "bar_body_ratio": "small candle body (price stalling)",
-}
+FEATURE_PLAIN_NAME = FEATURE_PLAIN  # one source of plain-English names, in features.py
 
 
 def render_plain_answer(report: Report, console: Console) -> None:
@@ -568,7 +576,7 @@ def render_plain_answer(report: Report, console: Console) -> None:
         f"    {'Partly.' if any_held else 'Taken one at a time,'} the three warning signs were checked "
         "separately, which is a harder test than the forecast above:"
     )
-    for f in report.study.findings:
+    for f in report.study.findings[:SUMMARY_FEATURE_LINES]:
         name = FEATURE_PLAIN_NAME.get(f.feature, f.feature)
         if not f.testable:
             outcome = "not enough data to judge"
@@ -577,6 +585,8 @@ def render_plain_answer(report: Report, console: Console) -> None:
         else:
             outcome = "checked, did not work"
         console.print(f"      {name:<34} - {outcome}")
+    if len(report.study.findings) > SUMMARY_FEATURE_LINES:
+        console.print(f"      ... and {len(report.study.findings) - SUMMARY_FEATURE_LINES} more, in the tables below")
     console.print()
 
     console.print("  [bold]So:[/bold]")
