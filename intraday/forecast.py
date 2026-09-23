@@ -16,8 +16,21 @@ module enforces the procedure:
 The scoring answer is the only claim this module makes. If the Brier skill score is not
 positive, the forecast carries no information and the report says so.
 
-Why a lookup table and not a model: it can be checked by hand. The probability for a
-breakout is the failure rate of its bucket in the training window, and both are printed.
+Why a lookup table and not a model: it can be checked by hand. Every number that goes
+into a prediction is printed - the base rate, each feature's bucket, its raw and shrunk
+failure rate, and the log-odds each contributes - so the result can be reproduced with a
+calculator.
+
+Two refinements over a plain average of bucket rates, both pre-registered:
+
+- Shrinkage. A bucket's rate becomes (failures + k * base) / (n + k). A bucket holding
+  six breakouts, four of which failed, is not evidence of a 67% failure rate; shrinkage
+  pulls it back towards the base rate until it has earned its distance from it.
+- Log-odds combination. Probabilities are combined as
+      logit(p) = logit(base) + damping * sum over features of (logit(bucket) - logit(base))
+  rather than averaged. A missing feature contributes exactly zero, so a prediction no
+  longer changes scale just because a feature is absent - which an average does, silently.
+  Damping below 1 stops three agreeing features from compounding into false certainty.
 """
 from __future__ import annotations
 
@@ -39,6 +52,7 @@ from intraday.stats import session_bootstrap, session_variance_share
 PREDICTIONS_FILE = "predictions.parquet"
 MIN_TRAIN_FAILURES = 30  # the same floor used everywhere else
 MIN_BUCKET_ROWS = 20  # below this a bucket's rate is too noisy to quote
+PROB_CLIP = (0.001, 0.999)  # logit is undefined at 0 and 1
 CALIBRATION_BINS = ((0.0, 0.1), (0.1, 0.2), (0.2, 0.3), (0.3, 0.5), (0.5, 1.01))
 
 
@@ -51,7 +65,8 @@ class Bucket(BaseModel):
     upper: float
     n: int
     failures: int
-    rate: float  # P(fail) in this bucket over the training window
+    raw_rate: float  # failures / n, before shrinkage
+    rate: float  # (failures + k * base) / (n + k): what the forecast actually uses
 
 
 class Rule(BaseModel):
@@ -66,17 +81,22 @@ class Rule(BaseModel):
     buckets: tuple[Bucket, ...]
     usable_features: tuple[str, ...]  # features with enough data to contribute
 
+    shrinkage_k: float
+    damping: float
+    combination: str
+
     def describe(self) -> list[str]:
         lines = [
             f"fitted on {self.n_train} breakouts, {self.fitted_on[0]} to {self.fitted_on[1]}, "
-            f"{self.train_failures} of them failed (base rate {self.base_rate:.1%})"
+            f"{self.train_failures} of them failed (base rate {self.base_rate:.1%})",
+            f"combination {self.combination}, shrinkage k={self.shrinkage_k:g}, damping {self.damping:g}",
         ]
         for f in self.usable_features:
             parts = [
-                f"{b.third} {b.rate:.0%} ({b.failures}/{b.n})"
+                f"{b.third} {b.failures}/{b.n} raw {b.raw_rate:.0%} -> shrunk {b.rate:.0%}"
                 for b in self.buckets if b.feature == f
             ]
-            lines.append(f"  {f}: " + "  ".join(parts))
+            lines.append(f"  {f}: " + "  |  ".join(parts))
         if not self.usable_features:
             lines.append("  no feature had enough data; the rule falls back to the base rate")
         return lines
@@ -92,8 +112,20 @@ class Prediction(BaseModel):
     made_at: datetime  # when the forecast was produced
     p_fail: float
     base_rate: float  # what the naive forecast would have said
-    contributions: dict[str, float]  # feature -> bucket rate that fed the average
+    contributions: dict[str, float]  # feature -> shrunk bucket rate used
+    log_odds: dict[str, float]  # feature -> logit(bucket) - logit(base), before damping
     outcome: str | None = None  # filled in only by scoring, never by prediction
+
+    def explain(self) -> list[str]:
+        """Every number that produced ``p_fail``, so it can be checked with a calculator."""
+        lines = [f"base rate {self.base_rate:.1%}  ->  logit {_logit(self.base_rate):+.4f}"]
+        for feature, rate in self.contributions.items():
+            lines.append(
+                f"  {feature}: bucket {rate:.1%} -> logit {_logit(rate):+.4f}, "
+                f"contributes {self.log_odds[feature]:+.4f}"
+            )
+        lines.append(f"total {self.p_fail:.1%}")
+        return lines
 
 
 def _bucket_for(value: float, buckets: Iterable[Bucket]) -> Bucket | None:
@@ -104,6 +136,22 @@ def _bucket_for(value: float, buckets: Iterable[Bucket]) -> Bucket | None:
         if value <= b.upper:
             return b
     return ordered[-1]
+
+
+def _logit(p: float) -> float:
+    p = min(max(p, PROB_CLIP[0]), PROB_CLIP[1])
+    return math.log(p / (1 - p))
+
+
+def _expit(x: float) -> float:
+    return 1.0 / (1.0 + math.exp(-x))
+
+
+def shrink(failures: int, n: int, base: float, k: float) -> float:
+    """Pull a bucket's rate towards the base rate until it has earned its distance."""
+    if n + k <= 0:
+        return base
+    return (failures + k * base) / (n + k)
 
 
 def fit_rule(train: pd.DataFrame, config: Config) -> Rule:
@@ -133,9 +181,11 @@ def fit_rule(train: pd.DataFrame, config: Config) -> Rule:
             if n < MIN_BUCKET_ROWS:
                 made = []
                 break
+            failures = int(fails[mask].sum())
             made.append(Bucket(
                 feature=feature, third=third, lower=lo, upper=hi,
-                n=n, failures=int(fails[mask].sum()), rate=float(fails[mask].mean()),
+                n=n, failures=failures, raw_rate=failures / n,
+                rate=shrink(failures, n, base, config.forecast_shrinkage_k),
             ))
         if made:
             buckets.extend(made)
@@ -148,21 +198,32 @@ def fit_rule(train: pd.DataFrame, config: Config) -> Rule:
         base_rate=base,
         buckets=tuple(buckets),
         usable_features=tuple(usable),
+        shrinkage_k=config.forecast_shrinkage_k,
+        damping=config.forecast_logodds_damping,
+        combination=config.forecast_combination,
     )
 
 
 def predict_one(row: pd.Series, rule: Rule, made_at: datetime | None = None) -> Prediction:
-    """P(this breakout fails), as the average of its buckets' training failure rates.
+    """P(this breakout fails), from its buckets' shrunk training failure rates.
 
-    Averaging keeps the arithmetic checkable: every contribution is printed. A feature
-    that is missing on this row simply does not contribute.
+    With ``combination="logodds"`` each feature contributes the distance of its bucket
+    from the base rate in log-odds, damped; a missing feature contributes nothing at all.
+    With ``"average"`` the old plain mean of bucket rates is used, kept so the two can be
+    compared on identical predictions rather than one being chosen quietly.
     """
     contributions: dict[str, float] = {}
     for feature in rule.usable_features:
         b = _bucket_for(float(row[feature]), [x for x in rule.buckets if x.feature == feature])
         if b is not None:
             contributions[feature] = b.rate
-    p = float(np.mean(list(contributions.values()))) if contributions else rule.base_rate
+
+    base_logit = _logit(rule.base_rate)
+    log_odds = {f: _logit(rate) - base_logit for f, rate in contributions.items()}
+    if rule.combination == "average":
+        p = float(np.mean(list(contributions.values()))) if contributions else rule.base_rate
+    else:
+        p = _expit(base_logit + rule.damping * sum(log_odds.values()))
     return Prediction(
         symbol=str(row["symbol"]),
         session_date=pd.Timestamp(row["session_date"]).date(),
@@ -172,10 +233,14 @@ def predict_one(row: pd.Series, rule: Rule, made_at: datetime | None = None) -> 
         p_fail=p,
         base_rate=rule.base_rate,
         contributions=contributions,
+        log_odds=log_odds,
     )
 
 
-def walk_forward(features: pd.DataFrame, config: Config, min_train_sessions: int = 20) -> pd.DataFrame:
+def walk_forward(
+    features: pd.DataFrame, config: Config, min_train_sessions: int = 20,
+    combination: str | None = None,
+) -> pd.DataFrame:
     """Replay the history one session at a time: fit on everything strictly earlier,
     predict the session, step forward. Returns predictions with outcomes attached for
     scoring - the outcome is joined AFTER the prediction is made, never before."""
@@ -194,7 +259,9 @@ def walk_forward(features: pd.DataFrame, config: Config, min_train_sessions: int
         train = df[df["_date"] < target]
         if (train["label"] == Label.BUSTED.value).sum() < MIN_TRAIN_FAILURES:
             continue  # the rule would be quoting rates built on too few failures
-        rule = fit_rule(train, config)
+        rule = fit_rule(train, config if combination is None else config.model_copy(
+            update={"forecast_combination": combination}
+        ))
         for _, row in df[df["_date"] == target].iterrows():
             p = predict_one(row, rule)
             rows.append({

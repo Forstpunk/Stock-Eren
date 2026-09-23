@@ -55,6 +55,15 @@ class Config(BaseModel):
     bootstrap_n: int = Field(default=1000, gt=0)
     benchmark_seed: int = 0
 
+    # Forecast combination. Both pre-registered in RESEARCH.md before implementation and
+    # fixed there: they are not to be tuned against study or forecast output.
+    # k is the number of observations a bucket needs before it is trusted as much as the
+    # base rate; damping keeps several agreeing features from compounding into false
+    # certainty.
+    forecast_shrinkage_k: float = Field(default=40.0, ge=0)
+    forecast_logodds_damping: float = Field(default=0.6, gt=0, le=1)
+    forecast_combination: Literal["logodds", "average"] = "logodds"
+
     # Breakout labelling. Thresholds are multiples of the prior-day ATR, not of the
     # opening-range width: width-unit thresholds made the resolution rate a function of
     # range width (wide ranges resolved as NEITHER 73% of the time on the yfinance pilot).

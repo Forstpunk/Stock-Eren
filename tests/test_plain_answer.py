@@ -69,6 +69,8 @@ def make_report(
         first_date="2026-07-27",
         last_date="2026-09-21",
         forecast=forecast,
+        forecast_alt=None,
+        forecast_alt_name="average",
         money=money,
         bottom_line=(
             "This setup (orb) lost money on this data, at every slippage level.",

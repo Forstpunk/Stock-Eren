@@ -80,6 +80,12 @@ def cmd_study(args: argparse.Namespace, config: Config) -> int:
         predictions = walk_forward(features, config)
         save_predictions(predictions, config.data_dir)
         console.print(f"  {len(predictions)} predictions made and saved")
+        # The other combination on identical predictions, so the report can show both.
+        other = "average" if config.forecast_combination == "logodds" else "logodds"
+        walk_forward(features, config, combination=other).to_parquet(
+            config.data_dir / f"predictions_{other}.parquet", index=False
+        )
+        console.print(f"  also scored with the {other} combination, for comparison")
     except ValueError as exc:
         console.print(f"  [yellow]skipped: {exc}")
 

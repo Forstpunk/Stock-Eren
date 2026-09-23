@@ -74,6 +74,8 @@ class Report(BaseModel):
     first_date: str
     last_date: str
     forecast: ForecastScore | None  # None when the history is too short to forecast on
+    forecast_alt: ForecastScore | None  # the same predictions under the other combination
+    forecast_alt_name: str
     money: dict[str, object] | None  # rupee summary of the first setup, None if it has no trades
     bottom_line: tuple[str, ...]
 
@@ -164,6 +166,14 @@ def build_report(config: Config) -> Report:
         forecast = score_forecast(load_predictions(data_dir), config)
     except (FileNotFoundError, ValueError):
         forecast = None
+    # The other combination, scored on identical walk-forward predictions, so the report
+    # can show both rather than quietly presenting the winner.
+    alt_name = "average" if config.forecast_combination == "logodds" else "logodds"
+    alt_path = data_dir / f"predictions_{alt_name}.parquet"
+    try:
+        forecast_alt = score_forecast(pd.read_parquet(alt_path), config) if alt_path.exists() else None
+    except ValueError:
+        forecast_alt = None
     money = _money_summary(backtests, data_dir, config)
     return Report(
         generated_at=datetime.now(tz=IST),
@@ -180,6 +190,8 @@ def build_report(config: Config) -> Report:
         first_date=dates[0] if dates else "-",
         last_date=dates[-1] if dates else "-",
         forecast=forecast,
+        forecast_alt=forecast_alt,
+        forecast_alt_name=alt_name,
         money=money,
         bottom_line=_bottom_line(study, verdicts_by_setup, money, forecast),
     )
@@ -442,6 +454,14 @@ def render_report(report: Report, console: Console) -> None:
     if report.forecast is not None:
         console.print("\n[bold]4. Forecast: predictions made before the outcome, then scored[/bold]")
         render_forecast(report.forecast, console)
+        if report.forecast_alt is not None:
+            alt = report.forecast_alt
+            console.print(
+                f"  For comparison, the same walk-forward predictions combined the other way "
+                f"({report.forecast_alt_name}): skill {alt.skill:+.1%} "
+                f"(95% CI {alt.skill_ci[0]:+.1%} to {alt.skill_ci[1]:+.1%}), Brier {alt.brier:.4f}. "
+                "Both methods were fixed in advance, so this is a comparison and not a selection."
+            )
         console.print("\n[bold]5. Cost of trading it[/bold]")
     else:
         console.print("\n[bold]4. Cost of trading it[/bold]")
