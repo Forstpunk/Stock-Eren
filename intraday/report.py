@@ -685,6 +685,19 @@ def render_three_way(score: ThreeWayScore, console: Console) -> None:
                 f"{b.observed_rate:.1%}", f"{b.observed_rate - b.mean_forecast:+.1f} pp",
             )
         console.print(table)
+    better = score.accuracy - score.accuracy_baseline
+    console.print(
+        f"  Accuracy: naming the single most likely outcome was right {score.accuracy:.1%} of the time. "
+        f"Always naming the commonest outcome ({max(score.class_counts, key=lambda c: score.class_counts[c]).lower()}) "
+        f"would have been right {score.accuracy_baseline:.1%} of the time, so the forecast is "
+        f"{abs(better):.1%} {'better' if better >= 0 else 'WORSE'} on that measure."
+    )
+    console.print(
+        "  [dim]Accuracy is the number most people ask for and the least useful one here. With failures "
+        "at roughly a fifth of breakouts, a forecaster that simply never predicts a failure scores about "
+        "80% and tells you nothing. That is why the verdict above rests on RPS skill - which is scored "
+        "against the base rates and cannot be gamed that way - and not on this line.[/dim]"
+    )
     console.print(
         "  How to read: RPS charges more for being wrong by two steps (calling a failure when it ran) "
         "than by one, which is why it is used instead of plain accuracy on three ordered outcomes."

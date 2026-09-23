@@ -465,3 +465,29 @@ def test_three_way_refuses_predictions_without_the_class_columns(config: Config)
     preds = pd.DataFrame({"p_fail": [0.2] * 40, "outcome": ["BUSTED"] * 40})
     with pytest.raises(ValueError, match="re-run the forecast"):
         score_three_way(preds, config)
+
+
+def test_accuracy_is_reported_next_to_the_majority_baseline(config: Config) -> None:
+    """Accuracy is the number people ask for and the easiest to game on a skewed problem.
+
+    A forecaster that never predicts the rare class scores the majority share and knows
+    nothing, so the score records both figures and the verdict never rests on accuracy.
+    """
+    from intraday.forecast import score_three_way
+
+    n = 300
+    outcomes = ["BUSTED"] * 60 + ["NEITHER"] * 180 + ["SUSTAINED"] * 60
+    never_predicts_failure = pd.DataFrame({
+        "p_busted": 0.0, "p_neither": 0.7, "p_sustained": 0.3,
+        "base_busted": 0.2, "base_neither": 0.6, "base_sustained": 0.2,
+        "outcome": outcomes,
+        "session_date": [date(2026, 6, 1) + timedelta(days=k // 5) for k in range(n)],
+    })
+    s = score_three_way(never_predicts_failure, config)
+    assert s.accuracy == pytest.approx(180 / 300), "it gets every NEITHER right and nothing else"
+    assert s.accuracy_baseline == pytest.approx(180 / 300)
+    assert s.accuracy == pytest.approx(s.accuracy_baseline), (
+        "a useless forecaster matches the baseline exactly - which is the point of showing both"
+    )
+    # and it is not rewarded for that: the ranked score still judges it against the base rates
+    assert s.verdict in {"no_better_than_base_rate", "informative"}

@@ -416,6 +416,12 @@ class ThreeWayScore(BaseModel):
     rps_base: float
     skill: float
     skill_ci: tuple[float, float]
+    # Plain "how often was the most likely outcome the right one", next to the number a
+    # forecaster gets for always naming the commonest outcome. Accuracy alone is
+    # misleading here: with failures at ~20%, "it never fails" scores ~80% and is useless,
+    # which is why the verdict is decided on RPS skill and not on this.
+    accuracy: float
+    accuracy_baseline: float
     calibration_busted: tuple[CalibrationBin, ...]
     calibration_sustained: tuple[CalibrationBin, ...]
     verdict: str
@@ -593,6 +599,9 @@ def score_three_way(predictions: pd.DataFrame, config: Config, seed: int = 0) ->
 
     counts = {c: int((outcomes == c).sum()) for c in ORDERED_CLASSES}
     rarest = min(counts, key=lambda c: counts[c])
+    predicted = forecast.argmax(axis=1)
+    accuracy = float((predicted == actual_index).mean())
+    accuracy_baseline = float(max(counts.values()) / n)
 
     if counts[rarest] < config.min_sample:
         verdict = "insufficient_sample"
@@ -620,6 +629,7 @@ def score_three_way(predictions: pd.DataFrame, config: Config, seed: int = 0) ->
         n=n, n_sessions=int(len(np.unique(sessions))), class_counts=counts,
         rarest_class=rarest, rarest_count=counts[rarest],
         rps=rps, rps_base=rps_base, skill=skill, skill_ci=(lo, hi),
+        accuracy=accuracy, accuracy_baseline=accuracy_baseline,
         calibration_busted=_calibration_for(
             forecast[:, position[Label.BUSTED.value]], (outcomes == Label.BUSTED.value).astype(float)
         ),
