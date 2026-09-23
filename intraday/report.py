@@ -22,6 +22,8 @@ from intraday.backtest import BacktestSummary, load_backtest, render_backtest
 from intraday.config import IST, Config
 from intraday.features import FEATURE_MECHANISM, FEATURE_PLAIN
 from intraday.forecast import Score as ForecastScore
+from intraday.forecast import ThreeWayScore
+from intraday.forecast import score_three_way
 from intraday.forecast import load_predictions, score as score_forecast
 from intraday.stats import effective_sample_size
 from intraday.labelling import base_rates, load_breakouts
@@ -76,6 +78,7 @@ class Report(BaseModel):
     forecast: ForecastScore | None  # None when the history is too short to forecast on
     forecast_alt: ForecastScore | None  # the same predictions under the other combination
     forecast_alt_name: str
+    forecast_three_way: ThreeWayScore | None  # the full BUSTED/NEITHER/SUSTAINED split
     money: dict[str, object] | None  # rupee summary of the first setup, None if it has no trades
     bottom_line: tuple[str, ...]
 
@@ -168,6 +171,10 @@ def build_report(config: Config) -> Report:
         forecast = None
     # The other combination, scored on identical walk-forward predictions, so the report
     # can show both rather than quietly presenting the winner.
+    try:
+        forecast_three_way = score_three_way(load_predictions(data_dir), config)
+    except (FileNotFoundError, ValueError):
+        forecast_three_way = None
     alt_name = "average" if config.forecast_combination == "logodds" else "logodds"
     alt_path = data_dir / f"predictions_{alt_name}.parquet"
     try:
@@ -192,6 +199,7 @@ def build_report(config: Config) -> Report:
         forecast=forecast,
         forecast_alt=forecast_alt,
         forecast_alt_name=alt_name,
+        forecast_three_way=forecast_three_way,
         money=money,
         bottom_line=_bottom_line(study, verdicts_by_setup, money, forecast),
     )
@@ -462,6 +470,10 @@ def render_report(report: Report, console: Console) -> None:
                 f"(95% CI {alt.skill_ci[0]:+.1%} to {alt.skill_ci[1]:+.1%}), Brier {alt.brier:.4f}. "
                 "Both methods were fixed in advance, so this is a comparison and not a selection."
             )
+        if report.forecast_three_way is not None:
+            console.print()
+            console.print("  [bold]The same forecast, all three outcomes[/bold]")
+            render_three_way(report.forecast_three_way, console)
         console.print("\n[bold]5. Cost of trading it[/bold]")
     else:
         console.print("\n[bold]4. Cost of trading it[/bold]")
@@ -645,5 +657,36 @@ def render_forecast(score: ForecastScore, console: Console) -> None:
     console.print(
         "  How to read: a well-calibrated forecast has 'actually failed' close to 'average forecast' in "
         "every band, and a useful one has the bands far apart. Skill above zero means it beat the base rate."
+    )
+    console.print(f"  [bold]{score.statement}")
+
+
+def render_three_way(score: ThreeWayScore, console: Console) -> None:
+    """The full three-outcome forecast: does it know WHICH outcome, not just whether it fails."""
+    counts = "  ".join(f"{c.lower()} {n}" for c, n in score.class_counts.items())
+    console.print(
+        f"  Outcomes among the {score.n} forecast breakouts: {counts}. The rarest "
+        f"({score.rarest_class.lower()}, {score.rarest_count}) is what the sample floor is applied to."
+    )
+    console.print(
+        f"  Ranked probability score {score.rps:.4f} against {score.rps_base:.4f} for always quoting the "
+        f"class shares -> skill {score.skill:+.1%} (95% CI {score.skill_ci[0]:+.1%} to "
+        f"{score.skill_ci[1]:+.1%}), sessions resampled."
+    )
+    for name, bins in (("failure", score.calibration_busted), ("running", score.calibration_sustained)):
+        if not bins:
+            continue
+        table = Table(title=f"Calibration of p({name}): what it said against what happened")
+        for col in ("forecast band", "n", "average forecast", "actually happened", "difference"):
+            table.add_column(col, justify="left" if col == "forecast band" else "right")
+        for b in bins:
+            table.add_row(
+                f"{b.lower:.0%} - {b.upper:.0%}", str(b.n), f"{b.mean_forecast:.1%}",
+                f"{b.observed_rate:.1%}", f"{b.observed_rate - b.mean_forecast:+.1f} pp",
+            )
+        console.print(table)
+    console.print(
+        "  How to read: RPS charges more for being wrong by two steps (calling a failure when it ran) "
+        "than by one, which is why it is used instead of plain accuracy on three ordered outcomes."
     )
     console.print(f"  [bold]{score.statement}")

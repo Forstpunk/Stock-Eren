@@ -31,6 +31,12 @@ Two refinements over a plain average of bucket rates, both pre-registered:
   rather than averaged. A missing feature contributes exactly zero, so a prediction no
   longer changes scale just because a feature is absent - which an average does, silently.
   Damping below 1 stops three agreeing features from compounding into false certainty.
+
+Each prediction also carries the full three-way split - p_busted, p_sustained, p_neither -
+because "will it fail?" throws away the difference between a breakout that runs and one
+that drifts, and those are not the same trade. The three are built the same way: shrunk
+class counts per bucket, combined as log-ratios against NEITHER, then normalised.
+``p_fail`` remains exactly ``p_busted`` so nothing downstream changes.
 """
 from __future__ import annotations
 
@@ -53,6 +59,11 @@ PREDICTIONS_FILE = "predictions.parquet"
 MIN_TRAIN_FAILURES = 30  # the same floor used everywhere else
 MIN_BUCKET_ROWS = 20  # below this a bucket's rate is too noisy to quote
 PROB_CLIP = (0.001, 0.999)  # logit is undefined at 0 and 1
+
+# Ordered worst to best for the ranked probability score: being wrong by two steps
+# (calling a failure when it ran) should cost more than being wrong by one.
+ORDERED_CLASSES: tuple[str, ...] = (Label.BUSTED.value, Label.NEITHER.value, Label.SUSTAINED.value)
+REFERENCE_CLASS = Label.NEITHER.value  # log-ratios are taken against this one
 CALIBRATION_BINS = ((0.0, 0.1), (0.1, 0.2), (0.2, 0.3), (0.3, 0.5), (0.5, 1.01))
 
 
@@ -67,6 +78,8 @@ class Bucket(BaseModel):
     failures: int
     raw_rate: float  # failures / n, before shrinkage
     rate: float  # (failures + k * base) / (n + k): what the forecast actually uses
+    class_counts: dict[str, int]  # BUSTED / NEITHER / SUSTAINED counts in this bucket
+    class_rates: dict[str, float]  # the same, shrunk towards the training class shares
 
 
 class Rule(BaseModel):
@@ -78,6 +91,7 @@ class Rule(BaseModel):
     n_train: int
     train_failures: int
     base_rate: float
+    class_shares: dict[str, float]  # training-window share of each class
     buckets: tuple[Bucket, ...]
     usable_features: tuple[str, ...]  # features with enough data to contribute
 
@@ -110,21 +124,34 @@ class Prediction(BaseModel):
     direction: str
     breakout_time: datetime
     made_at: datetime  # when the forecast was produced
-    p_fail: float
+    p_fail: float  # identical to class_probabilities[BUSTED]; kept so callers do not break
+    class_probabilities: dict[str, float]  # BUSTED / NEITHER / SUSTAINED, summing to 1
     base_rate: float  # what the naive forecast would have said
+    base_class_shares: dict[str, float]
     contributions: dict[str, float]  # feature -> shrunk bucket rate used
     log_odds: dict[str, float]  # feature -> logit(bucket) - logit(base), before damping
     outcome: str | None = None  # filled in only by scoring, never by prediction
 
     def explain(self) -> list[str]:
-        """Every number that produced ``p_fail``, so it can be checked with a calculator."""
-        lines = [f"base rate {self.base_rate:.1%}  ->  logit {_logit(self.base_rate):+.4f}"]
+        """Every number behind the prediction, so it can be checked with a calculator.
+
+        The binary line shows how far each feature moves the odds of failure; the
+        three-way line is what ``p_fail`` is actually taken from.
+        """
+        lines = [
+            f"base rates: "
+            + ", ".join(f"{c.lower()} {self.base_class_shares.get(c, 0.0):.1%}" for c in ORDERED_CLASSES)
+        ]
         for feature, rate in self.contributions.items():
             lines.append(
-                f"  {feature}: bucket {rate:.1%} -> logit {_logit(rate):+.4f}, "
-                f"contributes {self.log_odds[feature]:+.4f}"
+                f"  {feature}: failure bucket {rate:.1%} -> logit {_logit(rate):+.4f}, "
+                f"contributes {self.log_odds[feature]:+.4f} to the odds of failure"
             )
-        lines.append(f"total {self.p_fail:.1%}")
+        lines.append(
+            "three-way: "
+            + ", ".join(f"{c.lower()} {self.class_probabilities[c]:.1%}" for c in ORDERED_CLASSES)
+        )
+        lines.append(f"p(fail) {self.p_fail:.1%} (the BUSTED share of the three-way split)")
         return lines
 
 
@@ -154,6 +181,20 @@ def shrink(failures: int, n: int, base: float, k: float) -> float:
     return (failures + k * base) / (n + k)
 
 
+def buckets_hit(row: pd.Series, rule: Rule) -> list[Bucket]:
+    """The buckets this row lands in, one per usable feature it has a value for.
+
+    Exposed so that callers, tests and the report all select buckets the same way rather
+    than each re-deriving the boundary rule and disagreeing at the edges.
+    """
+    found: list[Bucket] = []
+    for feature in rule.usable_features:
+        b = _bucket_for(float(row[feature]), [x for x in rule.buckets if x.feature == feature])
+        if b is not None:
+            found.append(b)
+    return found
+
+
 def fit_rule(train: pd.DataFrame, config: Config) -> Rule:
     """Failure rate per third of each feature, over the rows given. Training data only."""
     if train.empty:
@@ -161,6 +202,8 @@ def fit_rule(train: pd.DataFrame, config: Config) -> Rule:
     dates = pd.to_datetime(train["session_date"]).dt.date
     is_fail = (train["label"] == Label.BUSTED.value).to_numpy()
     base = float(is_fail.mean())
+    labels = train["label"].to_numpy()
+    shares = {c: float((labels == c).mean()) for c in ORDERED_CLASSES}
 
     buckets: list[Bucket] = []
     usable: list[str] = []
@@ -182,10 +225,17 @@ def fit_rule(train: pd.DataFrame, config: Config) -> Rule:
                 made = []
                 break
             failures = int(fails[mask].sum())
+            bucket_labels = rows["label"].to_numpy()[mask]
+            counts = {c: int((bucket_labels == c).sum()) for c in ORDERED_CLASSES}
             made.append(Bucket(
                 feature=feature, third=third, lower=lo, upper=hi,
                 n=n, failures=failures, raw_rate=failures / n,
                 rate=shrink(failures, n, base, config.forecast_shrinkage_k),
+                class_counts=counts,
+                class_rates={
+                    c: shrink(counts[c], n, shares[c], config.forecast_shrinkage_k)
+                    for c in ORDERED_CLASSES
+                },
             ))
         if made:
             buckets.extend(made)
@@ -196,6 +246,7 @@ def fit_rule(train: pd.DataFrame, config: Config) -> Rule:
         n_train=len(train),
         train_failures=int(is_fail.sum()),
         base_rate=base,
+        class_shares=shares,
         buckets=tuple(buckets),
         usable_features=tuple(usable),
         shrinkage_k=config.forecast_shrinkage_k,
@@ -212,11 +263,8 @@ def predict_one(row: pd.Series, rule: Rule, made_at: datetime | None = None) -> 
     With ``"average"`` the old plain mean of bucket rates is used, kept so the two can be
     compared on identical predictions rather than one being chosen quietly.
     """
-    contributions: dict[str, float] = {}
-    for feature in rule.usable_features:
-        b = _bucket_for(float(row[feature]), [x for x in rule.buckets if x.feature == feature])
-        if b is not None:
-            contributions[feature] = b.rate
+    hit = buckets_hit(row, rule)
+    contributions = {b.feature: b.rate for b in hit}
 
     base_logit = _logit(rule.base_rate)
     log_odds = {f: _logit(rate) - base_logit for f, rate in contributions.items()}
@@ -224,17 +272,67 @@ def predict_one(row: pd.Series, rule: Rule, made_at: datetime | None = None) -> 
         p = float(np.mean(list(contributions.values()))) if contributions else rule.base_rate
     else:
         p = _expit(base_logit + rule.damping * sum(log_odds.values()))
+
+    classes = _combine_classes(rule, hit)
     return Prediction(
         symbol=str(row["symbol"]),
         session_date=pd.Timestamp(row["session_date"]).date(),
         direction=str(row["direction"]),
         breakout_time=pd.Timestamp(row["breakout_time"]).to_pydatetime(),
         made_at=made_at or datetime.now(tz=IST),
-        p_fail=p,
+        p_fail=classes[Label.BUSTED.value],
+        class_probabilities=classes,
         base_rate=rule.base_rate,
+        base_class_shares=dict(rule.class_shares),
         contributions=contributions,
         log_odds=log_odds,
     )
+
+
+def class_log_ratio(rates: dict[str, float], cls: str) -> float:
+    """log(P(cls) / P(NEITHER)) for one bucket or for the training window."""
+    top = max(rates.get(cls, 0.0), PROB_CLIP[0])
+    bottom = max(rates.get(REFERENCE_CLASS, 0.0), PROB_CLIP[0])
+    return math.log(top / bottom)
+
+
+def _combine_classes(rule: Rule, hit: list[Bucket]) -> dict[str, float]:
+    """Three-way probabilities from the buckets a row landed in.
+
+    Under "logodds", log-ratios against NEITHER are summed and damped exactly as the
+    binary case, then exponentiated and normalised. Under "average" the buckets' shrunk
+    class rates are averaged and normalised, which is the old behaviour extended to three
+    classes so the two methods stay comparable.
+
+    With no buckets hit the answer is the training-window class shares, which is the
+    honest "I know nothing extra beyond the base rates" position.
+    """
+    if not hit:
+        total = sum(rule.class_shares.get(c, 0.0) for c in ORDERED_CLASSES)
+        if total <= 0:
+            return {c: 1 / len(ORDERED_CLASSES) for c in ORDERED_CLASSES}
+        return {c: rule.class_shares.get(c, 0.0) / total for c in ORDERED_CLASSES}
+
+    if rule.combination == "average":
+        averaged = {
+            c: float(np.mean([b.class_rates.get(c, 0.0) for b in hit])) for c in ORDERED_CLASSES
+        }
+        total = sum(averaged.values())
+        if total <= 0:
+            return {c: 1 / len(ORDERED_CLASSES) for c in ORDERED_CLASSES}
+        return {c: v / total for c, v in averaged.items()}
+
+    scores: dict[str, float] = {}
+    for cls in ORDERED_CLASSES:
+        base_ratio = class_log_ratio(rule.class_shares, cls)
+        total = base_ratio
+        for b in hit:
+            total += rule.damping * (class_log_ratio(b.class_rates, cls) - base_ratio)
+        scores[cls] = total
+    largest = max(scores.values())  # subtract the max before exponentiating, for stability
+    weights = {c: math.exp(v - largest) for c, v in scores.items()}
+    denominator = sum(weights.values())
+    return {c: w / denominator for c, w in weights.items()}
 
 
 def walk_forward(
@@ -269,6 +367,12 @@ def walk_forward(
                 "breakout_time": p.breakout_time, "p_fail": p.p_fail, "base_rate": p.base_rate,
                 "n_train": rule.n_train, "train_failures": rule.train_failures,
                 "features_used": len(p.contributions),
+                "p_busted": p.class_probabilities[Label.BUSTED.value],
+                "p_neither": p.class_probabilities[Label.NEITHER.value],
+                "p_sustained": p.class_probabilities[Label.SUSTAINED.value],
+                "base_busted": rule.class_shares[Label.BUSTED.value],
+                "base_neither": rule.class_shares[Label.NEITHER.value],
+                "base_sustained": rule.class_shares[Label.SUSTAINED.value],
                 "outcome": str(row["label"]),  # joined after the fact, for scoring only
             })
     if not rows:
@@ -290,6 +394,32 @@ class CalibrationBin(BaseModel):
     n: int
     mean_forecast: float
     observed_rate: float
+
+
+class ThreeWayScore(BaseModel):
+    """Ranked probability score over the ordered classes BUSTED < NEITHER < SUSTAINED.
+
+    RPS sums the squared error of the CUMULATIVE probabilities, so being wrong by two
+    steps - calling a failure when it ran - costs more than being wrong by one. A perfect
+    forecast scores 0; the base-rate forecast scores whatever the class shares imply, and
+    skill is measured against that.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    n: int
+    n_sessions: int
+    class_counts: dict[str, int]
+    rarest_class: str
+    rarest_count: int
+    rps: float
+    rps_base: float
+    skill: float
+    skill_ci: tuple[float, float]
+    calibration_busted: tuple[CalibrationBin, ...]
+    calibration_sustained: tuple[CalibrationBin, ...]
+    verdict: str
+    statement: str
 
 
 class Score(BaseModel):
@@ -388,3 +518,113 @@ def load_predictions(data_dir: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"{path} not found; run study first")
     return pd.read_parquet(path)
+
+
+
+def ranked_probability_score(probabilities: np.ndarray, actual_index: np.ndarray) -> np.ndarray:
+    """Per-row RPS for ordered classes.
+
+    ``probabilities`` is (rows, classes) in ORDERED_CLASSES order; ``actual_index`` gives
+    the observed class position per row. Returns one score per row: the sum over the first
+    k-1 cumulative positions of (cumulative forecast - cumulative outcome) squared.
+    """
+    if probabilities.ndim != 2 or probabilities.shape[1] != len(ORDERED_CLASSES):
+        raise ValueError(f"probabilities must be (rows, {len(ORDERED_CLASSES)})")
+    if len(probabilities) != len(actual_index):
+        raise ValueError("probabilities and outcomes must be aligned")
+    cumulative_forecast = np.cumsum(probabilities, axis=1)[:, :-1]
+    outcome = np.zeros_like(probabilities)
+    outcome[np.arange(len(actual_index)), actual_index] = 1.0
+    cumulative_outcome = np.cumsum(outcome, axis=1)[:, :-1]
+    return ((cumulative_forecast - cumulative_outcome) ** 2).sum(axis=1)
+
+
+def _calibration_for(p: np.ndarray, actual: np.ndarray) -> tuple[CalibrationBin, ...]:
+    bins: list[CalibrationBin] = []
+    for lo, hi in CALIBRATION_BINS:
+        mask = (p >= lo) & (p < hi)
+        if mask.sum() == 0:
+            continue
+        bins.append(CalibrationBin(
+            lower=lo, upper=min(hi, 1.0), n=int(mask.sum()),
+            mean_forecast=float(p[mask].mean()), observed_rate=float(actual[mask].mean()),
+        ))
+    return tuple(bins)
+
+
+def score_three_way(predictions: pd.DataFrame, config: Config, seed: int = 0) -> ThreeWayScore:
+    """Grade the full three-outcome forecast against the base-rate forecast.
+
+    The sample floor is applied to the RAREST class: a three-way claim is only as strong
+    as its thinnest outcome, and quoting skill when one class has barely occurred would be
+    the same mistake the binary scorer already refuses to make.
+    """
+    needed = {"p_busted", "p_neither", "p_sustained", "base_busted", "base_neither",
+              "base_sustained", "outcome", "session_date"}
+    missing = needed - set(predictions.columns)
+    if missing:
+        raise ValueError(f"predictions lack {sorted(missing)}; re-run the forecast")
+    n = len(predictions)
+    if n == 0:
+        raise ValueError("no predictions to score")
+
+    forecast = predictions[["p_busted", "p_neither", "p_sustained"]].to_numpy(dtype="float64")
+    base = predictions[["base_busted", "base_neither", "base_sustained"]].to_numpy(dtype="float64")
+    outcomes = predictions["outcome"].to_numpy()
+    position = {c: k for k, c in enumerate(ORDERED_CLASSES)}
+    unknown = set(outcomes) - set(position)
+    if unknown:
+        raise ValueError(f"unknown outcome labels {sorted(unknown)}")
+    actual_index = np.array([position[o] for o in outcomes])
+
+    per_row = ranked_probability_score(forecast, actual_index)
+    per_row_base = ranked_probability_score(base, actual_index)
+    rps = float(per_row.mean())
+    rps_base = float(per_row_base.mean())
+    skill = float(1 - rps / rps_base) if rps_base > 0 else 0.0
+
+    sessions = predictions["session_date"].astype(str).to_numpy()
+
+    def skill_stat(idx: np.ndarray) -> float:
+        denominator = float(per_row_base[idx].mean())
+        return math.nan if denominator <= 0 else 1 - float(per_row[idx].mean()) / denominator
+
+    lo, hi, _ = session_bootstrap(sessions, skill_stat, config.bootstrap_n, np.random.default_rng(seed))
+
+    counts = {c: int((outcomes == c).sum()) for c in ORDERED_CLASSES}
+    rarest = min(counts, key=lambda c: counts[c])
+
+    if counts[rarest] < config.min_sample:
+        verdict = "insufficient_sample"
+        statement = (
+            f"INSUFFICIENT SAMPLE: the rarest outcome ({rarest.lower()}) occurred {counts[rarest]} times, "
+            f"below the {config.min_sample} minimum. A three-way forecast is only as strong as its "
+            "thinnest class, so it cannot be graded yet."
+        )
+    elif lo > 0:
+        verdict = "informative"
+        statement = (
+            f"The three-way forecast beat the base rates: RPS {rps:.4f} against {rps_base:.4f}, "
+            f"skill {skill:+.1%} (95% CI {lo:+.1%} to {hi:+.1%}). The interval is above zero, so it "
+            "carries information about which of the three outcomes follows, not just whether it fails."
+        )
+    else:
+        verdict = "no_better_than_base_rate"
+        statement = (
+            f"The three-way forecast did NOT reliably beat the base rates: RPS {rps:.4f} against "
+            f"{rps_base:.4f}, skill {skill:+.1%} (95% CI {lo:+.1%} to {hi:+.1%}). The interval includes "
+            "zero, so the apparent improvement is within noise."
+        )
+
+    return ThreeWayScore(
+        n=n, n_sessions=int(len(np.unique(sessions))), class_counts=counts,
+        rarest_class=rarest, rarest_count=counts[rarest],
+        rps=rps, rps_base=rps_base, skill=skill, skill_ci=(lo, hi),
+        calibration_busted=_calibration_for(
+            forecast[:, position[Label.BUSTED.value]], (outcomes == Label.BUSTED.value).astype(float)
+        ),
+        calibration_sustained=_calibration_for(
+            forecast[:, position[Label.SUSTAINED.value]], (outcomes == Label.SUSTAINED.value).astype(float)
+        ),
+        verdict=verdict, statement=statement,
+    )

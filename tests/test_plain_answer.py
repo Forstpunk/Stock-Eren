@@ -71,6 +71,7 @@ def make_report(
         forecast=forecast,
         forecast_alt=None,
         forecast_alt_name="average",
+        forecast_three_way=None,
         money=money,
         bottom_line=(
             "This setup (orb) lost money on this data, at every slippage level.",

@@ -11,6 +11,7 @@ import pytest
 from intraday.config import IST, Config
 from intraday.forecast import (
     MIN_TRAIN_FAILURES,
+    buckets_hit,
     fit_rule,
     predict_one,
     score,
@@ -69,9 +70,10 @@ def test_rule_ignores_features_with_thin_buckets(config: Config) -> None:
 
 
 def test_prediction_combines_its_buckets_in_log_odds(config: Config) -> None:
-    """Was an average of bucket rates before Phase 5; now a damped log-odds sum, so that a
-    missing feature contributes nothing instead of silently rescaling the result."""
-    import math as _m
+    """Averaged bucket rates before Phase 5, damped log-odds after it, and since Phase 6
+    p_fail is the BUSTED share of the three-way split rather than a separate binary number.
+    The log_odds field is kept as the per-feature diagnostic for the odds of failure."""
+    from intraday.forecast import ORDERED_CLASSES
 
     df = make_features(40, 20, signal=1.5, seed=3)
     rule = fit_rule(df, config)
@@ -79,8 +81,9 @@ def test_prediction_combines_its_buckets_in_log_odds(config: Config) -> None:
     p = predict_one(row, rule)
     assert p.contributions, "a complete row should hit a bucket for each usable feature"
     assert set(p.contributions) <= set(rule.usable_features)
-    expected = _m.log(rule.base_rate / (1 - rule.base_rate)) + rule.damping * sum(p.log_odds.values())
-    assert p.p_fail == pytest.approx(1 / (1 + _m.exp(-expected)))
+    assert set(p.log_odds) == set(p.contributions)
+    assert p.p_fail == pytest.approx(p.class_probabilities["BUSTED"])
+    assert sum(p.class_probabilities[c] for c in ORDERED_CLASSES) == pytest.approx(1.0)
     assert p.outcome is None, "a prediction must not carry the answer"
 
 
@@ -246,67 +249,111 @@ def test_prediction_equals_base_when_every_bucket_equals_base(config: Config) ->
     df = make_features(40, 20, signal=0.0, seed=21)
     rule = fit_rule(df, config)
     flat = rule.model_copy(update={
-        "buckets": tuple(b.model_copy(update={"rate": rule.base_rate}) for b in rule.buckets)
+        "buckets": tuple(
+            b.model_copy(update={"rate": rule.base_rate, "class_rates": dict(rule.class_shares)})
+            for b in rule.buckets
+        )
     })
     p = predict_one(df.iloc[0], flat)
-    assert p.p_fail == pytest.approx(rule.base_rate, abs=1e-9)
+    assert p.p_fail == pytest.approx(rule.class_shares["BUSTED"], abs=1e-9)
     assert all(abs(v) < 1e-9 for v in p.log_odds.values())
 
 
 def test_a_single_strong_feature_moves_the_prediction_the_right_way(config: Config) -> None:
+    """p_fail is the BUSTED share of the three-way split, so the class rates are what move it."""
     df = make_features(40, 20, signal=0.0, seed=22)
     rule = fit_rule(df, config)
     one = rule.model_copy(update={"usable_features": (rule.usable_features[0],)})
     feature = one.usable_features[0]
 
-    risky = one.model_copy(update={
-        "buckets": tuple(b.model_copy(update={"rate": 0.60}) for b in one.buckets if b.feature == feature)
-    })
-    safe = one.model_copy(update={
-        "buckets": tuple(b.model_copy(update={"rate": 0.05}) for b in one.buckets if b.feature == feature)
-    })
+    def with_class_rates(busted: float) -> object:
+        rest = (1 - busted) / 2
+        rates = {"BUSTED": busted, "NEITHER": rest, "SUSTAINED": rest}
+        return one.model_copy(update={
+            "buckets": tuple(
+                b.model_copy(update={"rate": busted, "class_rates": rates})
+                for b in one.buckets if b.feature == feature
+            )
+        })
+
     row = df.iloc[0]
-    assert predict_one(row, risky).p_fail > one.base_rate
-    assert predict_one(row, safe).p_fail < one.base_rate
+    base_busted = one.class_shares["BUSTED"]
+    assert predict_one(row, with_class_rates(0.60)).p_fail > base_busted
+    assert predict_one(row, with_class_rates(0.05)).p_fail < base_busted
 
 
 def test_a_missing_feature_contributes_nothing(config: Config) -> None:
-    """Under log-odds a missing feature must not shift the prediction, which an average does."""
+    """Under log-odds a missing feature drops out cleanly; an average would rescale."""
+    import math as _m
+
+    from intraday.forecast import ORDERED_CLASSES, REFERENCE_CLASS, class_log_ratio
+
     df = make_features(40, 20, signal=1.5, seed=23)
     rule = fit_rule(df, config)
     row = df.iloc[0].copy()
     full = predict_one(row, rule)
 
     dropped = rule.usable_features[-1]
+    bucket = next(b for b in buckets_hit(row, rule) if b.feature == dropped)
     row[dropped] = np.nan
     partial = predict_one(row, rule)
     assert dropped not in partial.contributions
-    expected = full.p_fail  # removing a contribution of exactly x should move logit by -x
-    import math as _m
 
-    moved = _m.log(partial.p_fail / (1 - partial.p_fail)) - _m.log(expected / (1 - expected))
-    assert moved == pytest.approx(-rule.damping * full.log_odds[dropped], abs=1e-9)
+    # Removing that bucket should move each class's log-ratio by exactly its damped term.
+    for cls in ORDERED_CLASSES:
+        if cls == REFERENCE_CLASS:
+            continue
+        base_ratio = class_log_ratio(rule.class_shares, cls)
+        expected_shift = -rule.damping * (class_log_ratio(bucket.class_rates, cls) - base_ratio)
+        before = _m.log(full.class_probabilities[cls] / full.class_probabilities[REFERENCE_CLASS])
+        after = _m.log(partial.class_probabilities[cls] / partial.class_probabilities[REFERENCE_CLASS])
+        assert after - before == pytest.approx(expected_shift, abs=1e-9), cls
 
 
 def test_explain_reproduces_the_number(config: Config) -> None:
+    """The printed pieces must rebuild p_fail, or the forecast is not hand-checkable.
+
+    Since Phase 6, p_fail is the BUSTED share of the three-way split, so the rebuild goes
+    through the class log-ratios rather than the binary logit.
+    """
     import math as _m
+
+    from intraday.forecast import ORDERED_CLASSES, class_log_ratio
 
     df = make_features(40, 20, signal=1.5, seed=24)
     rule = fit_rule(df, config)
-    p = predict_one(df.iloc[0], rule)
-    rebuilt = _m.log(p.base_rate / (1 - p.base_rate)) + rule.damping * sum(p.log_odds.values())
-    assert 1 / (1 + _m.exp(-rebuilt)) == pytest.approx(p.p_fail, abs=1e-9)
+    row = df.iloc[0]
+    p = predict_one(row, rule)
+
+    hit = buckets_hit(row, rule)
+    scores = {}
+    for cls in ORDERED_CLASSES:
+        base_ratio = class_log_ratio(rule.class_shares, cls)
+        scores[cls] = base_ratio + rule.damping * sum(
+            class_log_ratio(b.class_rates, cls) - base_ratio for b in hit
+        )
+    weights = {c: _m.exp(v - max(scores.values())) for c, v in scores.items()}
+    assert weights["BUSTED"] / sum(weights.values()) == pytest.approx(p.p_fail, abs=1e-9)
+
     text = "\n".join(p.explain())
-    assert "base rate" in text and "contributes" in text
+    assert "base rates" in text and "three-way" in text and "p(fail)" in text
 
 
 def test_average_combination_is_still_available(config: Config) -> None:
+    """The old method, extended to three classes: average the bucket rates and normalise."""
+    from intraday.forecast import ORDERED_CLASSES
+
     df = make_features(40, 20, signal=1.5, seed=25)
     avg_cfg = config.model_copy(update={"forecast_combination": "average"})
     rule = fit_rule(df, avg_cfg)
-    p = predict_one(df.iloc[0], rule)
-    assert p.p_fail == pytest.approx(float(np.mean(list(p.contributions.values()))))
+    row = df.iloc[0]
+    p = predict_one(row, rule)
     assert rule.combination == "average"
+
+    hit = buckets_hit(row, rule)
+    averaged = {c: float(np.mean([b.class_rates[c] for b in hit])) for c in ORDERED_CLASSES}
+    total = sum(averaged.values())
+    assert p.p_fail == pytest.approx(averaged["BUSTED"] / total)
 
 
 def test_walk_forward_can_score_either_combination(config: Config) -> None:
@@ -318,3 +365,103 @@ def test_walk_forward_can_score_either_combination(config: Config) -> None:
     # both remain honest walk-forward predictions
     for frame in (a, b):
         assert frame["session_date"].nunique() > 1
+
+
+# ---- three-outcome forecast (Phase 6) --------------------------------------------------
+
+
+def test_class_probabilities_sum_to_one(config: Config) -> None:
+    from intraday.forecast import ORDERED_CLASSES
+
+    df = make_features(40, 20, signal=1.5, seed=30)
+    rule = fit_rule(df, config)
+    for k in range(0, len(df), 97):
+        p = predict_one(df.iloc[k], rule)
+        assert sum(p.class_probabilities[c] for c in ORDERED_CLASSES) == pytest.approx(1.0)
+        assert all(0.0 <= p.class_probabilities[c] <= 1.0 for c in ORDERED_CLASSES)
+        assert p.p_fail == pytest.approx(p.class_probabilities["BUSTED"])
+
+
+def test_no_buckets_hit_gives_the_training_class_shares(config: Config) -> None:
+    from intraday.forecast import ORDERED_CLASSES
+
+    df = make_features(40, 20, signal=1.5, seed=31)
+    rule = fit_rule(df, config)
+    blank = df.iloc[0].copy()
+    for f in rule.usable_features:
+        blank[f] = np.nan
+    p = predict_one(blank, rule)
+    for c in ORDERED_CLASSES:
+        assert p.class_probabilities[c] == pytest.approx(rule.class_shares[c], abs=1e-9)
+
+
+def test_rps_of_a_perfect_forecast_is_zero() -> None:
+    from intraday.forecast import ORDERED_CLASSES, ranked_probability_score
+
+    certain = np.eye(len(ORDERED_CLASSES))
+    outcomes = np.arange(len(ORDERED_CLASSES))
+    assert ranked_probability_score(certain, outcomes) == pytest.approx(np.zeros(len(ORDERED_CLASSES)))
+
+
+def test_rps_punishes_being_wrong_by_two_steps_more_than_one() -> None:
+    """The whole point of the ranked score: calling a failure when it ran is the worst miss."""
+    from intraday.forecast import ranked_probability_score
+
+    said_busted = np.array([[1.0, 0.0, 0.0]])
+    off_by_one = ranked_probability_score(said_busted, np.array([1]))[0]  # actually NEITHER
+    off_by_two = ranked_probability_score(said_busted, np.array([2]))[0]  # actually SUSTAINED
+    assert off_by_two > off_by_one > 0
+
+
+def test_base_rate_forecast_scores_zero_skill(config: Config) -> None:
+    from intraday.forecast import score_three_way
+
+    n = 300
+    rng = np.random.default_rng(4)
+    outcomes = rng.choice(["BUSTED", "NEITHER", "SUSTAINED"], size=n, p=[0.2, 0.55, 0.25])
+    shares = {"BUSTED": 0.2, "NEITHER": 0.55, "SUSTAINED": 0.25}
+    preds = pd.DataFrame({
+        "p_busted": shares["BUSTED"], "p_neither": shares["NEITHER"], "p_sustained": shares["SUSTAINED"],
+        "base_busted": shares["BUSTED"], "base_neither": shares["NEITHER"], "base_sustained": shares["SUSTAINED"],
+        "outcome": outcomes,
+        "session_date": [date(2026, 6, 1) + timedelta(days=k // 5) for k in range(n)],
+    })
+    s = score_three_way(preds, config)
+    assert s.skill == pytest.approx(0.0, abs=1e-12)
+    assert s.rps == pytest.approx(s.rps_base)
+
+
+def test_three_way_floor_applies_to_the_rarest_class(config: Config) -> None:
+    from intraday.forecast import score_three_way
+
+    n = 300
+    outcomes = ["BUSTED"] * 5 + ["NEITHER"] * 200 + ["SUSTAINED"] * 95
+    preds = pd.DataFrame({
+        "p_busted": 0.2, "p_neither": 0.55, "p_sustained": 0.25,
+        "base_busted": 0.2, "base_neither": 0.55, "base_sustained": 0.25,
+        "outcome": outcomes,
+        "session_date": [date(2026, 6, 1) + timedelta(days=k // 5) for k in range(n)],
+    })
+    s = score_three_way(preds, config)
+    assert s.verdict == "insufficient_sample"
+    assert s.rarest_class == "BUSTED" and s.rarest_count == 5
+    assert "thinnest class" in s.statement
+
+
+def test_three_way_finds_a_real_pattern(config: Config) -> None:
+    from intraday.forecast import score_three_way
+
+    preds = walk_forward(make_features(80, 20, signal=2.5, seed=32), config)
+    s = score_three_way(preds, config)
+    assert s.n == len(preds)
+    assert sum(s.class_counts.values()) == s.n
+    assert s.calibration_busted and s.calibration_sustained
+    assert s.verdict in {"informative", "no_better_than_base_rate"}
+
+
+def test_three_way_refuses_predictions_without_the_class_columns(config: Config) -> None:
+    from intraday.forecast import score_three_way
+
+    preds = pd.DataFrame({"p_fail": [0.2] * 40, "outcome": ["BUSTED"] * 40})
+    with pytest.raises(ValueError, match="re-run the forecast"):
+        score_three_way(preds, config)
