@@ -1,8 +1,10 @@
 """Shared setup mechanics: the one exit simulator and the trade builder.
 
 Exit rules (both setups):
-- stop: an ATR multiple below/above entry; filled AT the stop price when a bar's
-  extreme crosses it, checked from the entry bar inclusive
+- stop: an ATR multiple below/above entry. Filled AT the stop price when a bar trades
+  through it during the bar, but at the bar's OPEN when the bar opens already beyond the
+  stop - a gap through the level fills where the market reopens, not where the order sat.
+  Checked from the entry bar inclusive
 - eod: close of the session's last bar (the 15:15 bar on TAIL_COLLAPSED sessions,
   whose close is the official close)
 - partial_1r variant: half the position exits at +1R (entry + risk) the first time a
@@ -47,6 +49,7 @@ def simulate_exit(session: pd.DataFrame, entry_pos: int, direction: Direction, e
     highs = session["high"].to_numpy(dtype="float64")
     lows = session["low"].to_numpy(dtype="float64")
     closes = session["close"].to_numpy(dtype="float64")
+    opens = session["open"].to_numpy(dtype="float64")
     last = len(session) - 1
     target = entry_price + sign * risk
     mfe = entry_price
@@ -63,7 +66,11 @@ def simulate_exit(session: pd.DataFrame, entry_pos: int, direction: Direction, e
         mfe = max(mfe, favourable(k)) if direction == "long" else min(mfe, favourable(k))
         stop_hit = sign * (adverse(k) - active_stop) <= 0
         if stop_hit:
-            final = active_stop
+            # A bar that opens beyond the stop gapped through it: the fill is the open,
+            # which is worse than the stop. Taking the stop price here would credit the
+            # trade with a price that was never available.
+            gapped_through = sign * (opens[k] - active_stop) <= 0
+            final = opens[k] if gapped_through else active_stop
             reason: ExitReason = "stop"
             return Exit(exit_index=k, exit_price=_blend(partial_done, target, final), reason=reason, mfe_price=mfe)
         if variant == "partial_1r" and not partial_done and sign * (favourable(k) - target) >= 0:

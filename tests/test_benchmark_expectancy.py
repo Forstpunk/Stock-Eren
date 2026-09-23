@@ -193,3 +193,26 @@ def test_segmented_expectancy_lists_skipped(stores, config: Config) -> None:  # 
     assert set(by_width) | set(skipped_w) == {"or_width Q1", "or_width Q2", "or_width Q3", "or_width Q4"}
     computed2, skipped2 = segmented_expectancy(df.iloc[:20], "seg_rvol", config, seed=0)
     assert computed2 == {} and skipped2 == {"rvol 1.0-2": 20}
+
+
+def test_random_twin_is_stopped_like_the_strategy(stores, universe, config: Config) -> None:  # type: ignore[no-untyped-def]
+    """Without a stop the twin's losses could run past -1R while the strategy's could not,
+    which flattered the strategy by comparison. The benchmark has to be beatable on entry
+    selection, not on having a stop the other side lacks."""
+    strat = strategy_results(stores, config)
+    twins = matched_random(strat, universe, WINDOW, config, seed=11)
+    for t in twins:
+        assert t.trade.exit_reason in ("stop", "time")
+        # the stop caps the loss at 1R plus costs, exactly as it does for the strategy
+        assert t.r_gross >= -1.0001, f"twin lost {t.r_gross:.3f}R with a stop in place"
+        assert t.duration_bars <= 12, "the twin may exit early on a stop, never later than the match"
+
+
+def test_twin_still_matches_session_and_window_after_stopping(stores, universe, config: Config) -> None:  # type: ignore[no-untyped-def]
+    strat = strategy_results(stores, config)
+    for s, t in zip(strat, matched_random(strat, universe, WINDOW, config, seed=12)):
+        assert t.trade.session_date == s.trade.session_date
+        assert WINDOW[0] <= t.trade.entry_time.time() <= WINDOW[1]
+        assert abs(t.trade.entry_price - t.trade.stop_price) == pytest.approx(
+            config.stop_atr_multiple * t.trade.atr
+        )

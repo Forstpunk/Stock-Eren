@@ -20,14 +20,14 @@ def test_costs_50k_flat_at_10bps_by_hand() -> None:
     assert c.stamp == pytest.approx(1.5)  # 0.003% x 50,000, buy only
     assert c.sebi_buy == pytest.approx(0.05)  # 0.0001% x 50,000
     assert c.sebi_sell == pytest.approx(0.05)
-    assert c.gst == pytest.approx(0.18 * (15 + 15 + 1.485 + 1.485))  # 5.9346
+    assert c.gst == pytest.approx(0.18 * (15 + 15 + 1.485 + 1.485 + 0.05 + 0.05))  # 5.9526
     assert c.slippage_buy == pytest.approx(50.0)  # 10 bps x 50,000
     assert c.slippage_sell == pytest.approx(50.0)
-    assert c.statutory == pytest.approx(30 + 12.5 + 2.97 + 1.5 + 0.10 + 5.9346)  # 53.0046
-    assert c.total == pytest.approx(153.0046)
+    assert c.statutory == pytest.approx(30 + 12.5 + 2.97 + 1.5 + 0.10 + 5.9526)  # 53.0226
+    assert c.total == pytest.approx(153.0226)
 
 
-@pytest.mark.parametrize("bps,expected_total", [(5, 103.0046), (10, 153.0046), (20, 253.0046)])
+@pytest.mark.parametrize("bps,expected_total", [(5, 103.0226), (10, 153.0226), (20, 253.0226)])
 def test_costs_at_three_slippage_levels(bps: int, expected_total: float) -> None:
     assert round_trip_costs(50_000, 50_000, bps).total == pytest.approx(expected_total)
 

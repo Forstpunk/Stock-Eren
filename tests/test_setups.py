@@ -265,3 +265,29 @@ def test_run_backtest_end_to_end(tmp_path: Path, config: Config) -> None:
         assert v.edge.n == v.n and v.overall is None or v.overall.n == v.n  # tiny sample -> insufficient
     save_backtest(summary, table, tmp_path)
     assert load_backtest("orb", tmp_path) == summary
+
+
+def test_gap_through_the_stop_fills_at_the_open(config: Config) -> None:
+    """A bar that opens beyond the stop never offered the stop price.
+
+    Filling at the stop would credit the trade with a price that was not available, which
+    flatters every result built on it.
+    """
+    df = flat_session()
+    # entry 100, stop 96; this bar opens at 92, already through the stop
+    set_bar(df, 20, 92.0, 92.5, 91.0, 91.5)
+    gapped = simulate_exit(df, 10, "long", 100.0, 96.0, "base")
+    assert gapped.reason == "stop" and gapped.exit_index == 20
+    assert gapped.exit_price == 92.0, "the fill is the open, not the stop"
+
+    # a bar that opens above the stop and trades down through it still fills at the stop
+    df2 = flat_session()
+    set_bar(df2, 20, 99.0, 99.2, 91.0, 91.5)
+    traded = simulate_exit(df2, 10, "long", 100.0, 96.0, "base")
+    assert traded.exit_price == 96.0
+
+    # and the same for a short, where the gap is upwards
+    df3 = flat_session()
+    set_bar(df3, 20, 108.0, 109.0, 107.5, 108.5)
+    short = simulate_exit(df3, 10, "short", 100.0, 104.0, "base")
+    assert short.reason == "stop" and short.exit_price == 108.0

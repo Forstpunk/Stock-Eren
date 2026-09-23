@@ -7,10 +7,11 @@
 - the same R definition: stop = same ATR multiple of the twin symbol's prior-day ATR
 - the same costs at the same slippage
 
-The twin holds for the duration without a stop and exits at the close of its exit bar;
-the strategy's exit rule already shaped its duration, so matching the duration isolates
-entry selection. Deterministic under ``seed``. Edge is the mean net R difference over
-the pairs with a paired bootstrap CI.
+The twin is stopped on the same rule as the strategy and otherwise held for the matched
+duration, exiting at the close of its exit bar. Without a stop its losses could run past
+-1R while the strategy's could not, which flattered the strategy by comparison.
+Deterministic under ``seed``. Edge is the mean net R difference over the pairs with a
+session bootstrap CI.
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ from pydantic import BaseModel, ConfigDict
 
 from intraday.config import Config
 from intraday.indicators import atr_prior_day
+from intraday.setups.common import simulate_exit
 from intraday.stats import mean_stat, session_bootstrap
 from intraday.store import BarStore
 from intraday.trades import Trade, TradeResult, evaluate
@@ -82,6 +84,14 @@ def random_twin(
     entry_price = float(bars["open"].iloc[entry])
     atr_value = universe.atr[(symbol, day)]
     stop = entry_price - sign * config.stop_atr_multiple * atr_value
+
+    # Same stop rule as the strategy, then capped at the matched duration: the benchmark
+    # has to be beatable on entry selection, not on the strategy having a stop and it not.
+    simulated = simulate_exit(bars, entry, direction, entry_price, stop, "base")
+    if simulated.exit_index <= exit_:
+        exit_, exit_price, reason = simulated.exit_index, simulated.exit_price, simulated.reason
+    else:
+        exit_price, reason = float(bars["close"].iloc[exit_]), "time"
     path = bars.iloc[entry : exit_ + 1]
     mfe = float(path["high"].max()) if direction == "long" else float(path["low"].min())
     return Trade(
@@ -95,8 +105,8 @@ def random_twin(
         entry_price=entry_price,
         exit_index=exit_,
         exit_time=bars.index[exit_].to_pydatetime(),
-        exit_price=float(bars["close"].iloc[exit_]),
-        exit_reason="time",
+        exit_price=exit_price,
+        exit_reason=reason,
         stop_price=stop,
         atr=atr_value,
         stop_atr_multiple=config.stop_atr_multiple,

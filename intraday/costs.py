@@ -6,7 +6,7 @@ Per order, both sides unless stated:
 - exchange txn:   0.00297% of turnover
 - stamp duty:     0.003% of turnover, BUY side only
 - SEBI fee:       0.0001% of turnover
-- GST:            18% of (brokerage + exchange txn)
+- GST:            18% of (brokerage + exchange txn + SEBI fee)
 - slippage:       bps x turnover
 
 A round trip has one buy leg and one sell leg regardless of direction; a short simply
@@ -99,7 +99,7 @@ def round_trip_costs(buy_turnover: float, sell_turnover: float, slippage_bps: in
         stamp=STAMP_RATE_BUY * buy_turnover,
         sebi_buy=SEBI_RATE * buy_turnover,
         sebi_sell=SEBI_RATE * sell_turnover,
-        gst=GST_RATE * (b_buy + b_sell + x_buy + x_sell),
+        gst=GST_RATE * (b_buy + b_sell + x_buy + x_sell + SEBI_RATE * (buy_turnover + sell_turnover)),
         slippage_buy=slippage_bps / 10_000 * buy_turnover,
         slippage_sell=slippage_bps / 10_000 * sell_turnover,
     )

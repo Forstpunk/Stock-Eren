@@ -39,12 +39,13 @@ mid third                         117       21     17.9%      -2.1
 high third                        118       13     11.0%      -9.0
 ```
 
-A feature counts as a finding only if **both** of these hold:
+The period is split by date: the earliest 70% of dates are the first period, the later 30%
+the second. A feature counts as a finding only if **both** of these hold:
 
-1. each half of the period contains at least **30 failed breakouts among the rows where
+1. each period contains at least **30 failed breakouts among the rows where
    that feature exists** — otherwise the feature is reported as *not testable* and no
    claim is made about it either way;
-2. its low-third-to-high-third gap is at least **10 percentage points in both halves**.
+2. its low-third-to-high-third gap is at least **10 percentage points in both periods**.
 
 The per-feature floor matters more than it sounds. RVOL needs 20 prior sessions, so on a
 short history it exists on only a fraction of the rows and is almost absent early on. A
@@ -70,8 +71,9 @@ research becomes storytelling.
 | neither | everything else, kept as its own class | |
 | features tested (directional) | opening-15m volume, breakout-bar volume, breakout-bar body, relative strength vs index, index breaking the same way, overnight gap, breakout depth | `features.FEATURE_NAMES` |
 | features reported but two-sided | yesterday's move, expiry day | `features.REPORT_ONLY_NAMES` |
+| split | earliest 70% of dates / later 30% of dates | `analysis.TRAIN_FRACTION` |
 | gap to count as a finding | 10 points, in both periods | `analysis.MIN_GAP_PCT` |
-| failures needed to test a feature | 30 in each half, where the feature exists | `config.min_sample` |
+| failures needed to test a feature | 30 in each period, where the feature exists | `config.min_sample` |
 | stop | 1.0 x prior-day ATR | `config.stop_atr_multiple` |
 | position | Rs 50,000 | `config.position_inr` |
 | min sample | 30 failures / 30 trades per claim | `config.min_sample` |
@@ -99,6 +101,11 @@ the reason, so a later result can never be quietly explained by a rule that move
 
 | date | change | reason |
 |---|---|---|
+| 2026-09-23 | **Forecast combination: average of bucket rates → shrunk log-odds.** | An average let a missing feature drag the prediction towards whatever the other features said, so an incomplete row silently changed scale. Under log-odds a missing feature contributes exactly zero. Shrinkage (k=40) stops a six-observation bucket being quoted as if it were evidence. Both parameters pre-registered in RESEARCH.md before implementation; the old method is kept and reported side by side. |
+| 2026-09-23 | **Three-outcome forecast added.** | "Will it fail?" throws away the difference between a breakout that runs and one that drifts, and those are not the same trade. Predictions now carry p_busted, p_sustained and p_neither, scored with the ranked probability score so being wrong by two steps costs more than by one. `p_fail` is now defined as the BUSTED share of that split. |
+| 2026-09-23 | **Random twin is now stopped.** | The benchmark twin had no stop, so its losses could run past −1R while the strategy's could not. That flattered the strategy by comparison. The twin now uses the same stop rule, capped at the matched duration. This makes reported edge vs random smaller, and correct. |
+| 2026-09-23 | **Gap-through stops fill at the bar's open.** | A bar that opens beyond the stop never offered the stop price. Filling at the stop credited trades with prices that were not available. |
+| 2026-09-23 | **GST now applies to the SEBI fee.** | It always did in reality; the model omitted it. Round-trip cost on a ₹50,000 flat trade at 10 bps moves from ₹153.0046 to ₹153.0226. |
 | 2026-09-23 | **RVOL lookback: 20 → 14 sessions.** | Taken from Zarattini & Aziz, who define relative volume against the previous 14 days, and pre-registered in RESEARCH.md before implementation. Not chosen from our results. It also lifts the rows where RVOL exists from 347 of 840 to 493, which is what made the feature testable in both periods at all. |
 | 2026-09-23 | **Bootstrap unit: trade → session.** Every confidence interval (forecast skill, edge vs random, expectancy) now resamples whole sessions rather than individual trades. | Breakouts on the same session share that day's market-wide shock. Resampling rows treats them as independent, which makes intervals far too narrow and can declare an edge that is not there. Measured on synthetic data with zero true effect and a realistic session shock, row resampling produced a false-positive rate well above the nominal 5%; session resampling stays near it. |
 
@@ -133,10 +140,7 @@ On 41 sessions x 20 symbols: 20% of breakouts failed, stable month to month. The
 ORB+VWAP setup is indistinguishable from random entries and loses 0.12–0.29R per trade to
 costs at 5–20 bps.
 
-The verdict is `no_signal`. Only `bar_body_ratio` had enough failures in both halves to be
-tested, and its gap did not hold. The two volume features could not be tested at all: they
-exist on 347 of 840 breakouts, and the first half holds 13 failures where they exist
-against a floor of 30.
+See `data/report.txt` after a run for the current verdict; it moves as the data does.
 
 That is a limit of the data, not of the method. yfinance serves a rolling 60 days, so the
 sample cannot grow past this.
