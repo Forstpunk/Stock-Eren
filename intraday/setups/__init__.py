@@ -16,7 +16,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from intraday.config import Config
-from intraday.features import FEATURE_NAMES
+from intraday.features import ALL_COLUMNS
 from intraday.indicators import atr_prior_day
 from intraday.setups import failed_orb, orb
 from intraday.store import BarStore
@@ -45,7 +45,7 @@ def features_by_session(features: pd.DataFrame) -> dict[tuple[str, date], dict[s
     out: dict[tuple[str, date], dict[str, dict[str, float]]] = {}
     for _, row in features.iterrows():
         key = (str(row["symbol"]), pd.Timestamp(row["session_date"]).date())
-        out.setdefault(key, {})[str(row["direction"])] = {f: float(row[f]) for f in FEATURE_NAMES}
+        out.setdefault(key, {})[str(row["direction"])] = {f: float(row[f]) for f in ALL_COLUMNS}
     return out
 
 

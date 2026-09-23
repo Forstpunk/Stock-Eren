@@ -67,7 +67,6 @@ def test_integrity_summary_counts_equities_only() -> None:
     assert s.sessions_validated == 4 and s.symbols == 2 and s.research_sessions == 2
     assert s.verdict_counts == {"CLEAN": 1, "TAIL_COLLAPSED": 1, "PARTIAL": 1, "SUSPECT": 0, "CORRUPT": 1}
     assert s.per_symbol_non_research == {"A": 1, "B": 1}
-    assert s.missing_slot_counts == {"15:20": 2, "15:15": 1}
     assert s.daily_rows == 2 and s.daily_corrupt == 1
     assert s.last_fetch == {"event": "fetch_run", "ts": "t2"}
 
@@ -83,13 +82,21 @@ def test_caveats_verbatim() -> None:
     )
 
 
-@pytest.mark.skipif(not Path("data/backtest_orb.json").exists(), reason="project artifacts not present")
+@pytest.mark.skipif(
+    not (Path("data/backtest_orb.json").exists() and Path("data/study.json").exists()),
+    reason="project artifacts not present",
+)
 def test_report_builds_from_project_artifacts(config: Config) -> None:
     report = build_report(config)
     console = Console(record=True, width=150, file=io.StringIO())
     render_report(report, console)
     text = console.export_text()
-    for heading in ("Verdicts", "1. Data integrity", "2. Base rates", "3. Diagnostic", "THE HEADLINE", "7. Caveats"):
+    for heading in (
+        "In four sentences", "Verdicts", "1. Data integrity", "2. Base rates",
+        "3. What separates a failed breakout", "4. Cost of trading it", "5. Caveats",
+    ):
         assert heading in text
     assert text.rstrip().endswith('"No edge detected" is a valid and useful result.')
     assert "orb" in report.setup_verdicts
+    # the four sentences are numbered and come before any table
+    assert text.index("1. Data:") < text.index("1. Data integrity")

@@ -10,8 +10,9 @@ recorded separately. Each trade carries the original breakout's Stage 5 feature 
 ``signal_at`` resolves the breakout on the frame truncated at ``i``, so it can only see
 what a trader at that close could see; it is tested against the lookahead harness.
 
-The gate: ``assert_gate_open`` reads the latest diagnostic report and raises unless its
-verdict is "signal". There is no override flag.
+The gate: ``assert_gate_open`` reads the latest study and raises unless its verdict is
+"signal" - i.e. unless some feature separates failed breakouts in both halves of the
+period. There is no override flag.
 """
 from __future__ import annotations
 
@@ -33,14 +34,17 @@ class GateClosedError(Exception):
     """Stage 6 has not produced an out-of-sample signal; S2 may not run."""
 
 
+STUDY_FILE = "study.json"
+
+
 def assert_gate_open(data_dir: Path, config: Config) -> str:
-    path = data_dir / f"diagnostic_rvol{config.rvol_lookback_sessions}.json"
+    path = data_dir / STUDY_FILE
     if not path.exists():
-        raise GateClosedError(f"{path} not found: run diagnose before backtesting {NAME}")
+        raise GateClosedError(f"{path} not found: run the study before backtesting {NAME}")
     verdict = json.loads(path.read_text(encoding="utf-8"))["verdict"]
     if verdict != "signal":
         raise GateClosedError(
-            f"Stage 6 verdict is {verdict!r} ({path.name}); {NAME} runs only on a 'signal' verdict. "
+            f"the study verdict is {verdict!r} ({path.name}); {NAME} runs only on a 'signal' verdict. "
             "This is the research gate, not a bug."
         )
     return verdict

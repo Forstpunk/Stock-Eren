@@ -1,10 +1,8 @@
 """Report assembly and rendering, from persisted artifacts only.
 
-Order: run header -> verdicts -> data integrity -> base rates -> diagnostic ->
-edge vs benchmark -> expectancy -> segments (per setup) -> caveats (verbatim).
-
-Nothing is recomputed here. Missing core artifacts raise with the command to run;
-the gated setup (failed_orb) is reported as "gate closed" when absent.
+The report opens with four plain sentences - data, base rates, what separates failures,
+what trading it costs - and only then shows the tables behind them. Nothing is
+recomputed here; every number comes from a file a previous step wrote.
 """
 from __future__ import annotations
 
@@ -19,13 +17,14 @@ from pydantic import BaseModel, ConfigDict
 from rich.console import Console
 from rich.table import Table
 
+from intraday.analysis import MIN_GAP_PCT, Study
 from intraday.backtest import BacktestSummary, load_backtest, render_backtest
 from intraday.config import IST, Config
-from intraday.diagnostic import DiagnosticReport
-from intraday.diagnostic_render import render as render_diagnostic
+from intraday.features import FEATURE_MECHANISM
 from intraday.labelling import base_rates, load_breakouts
 from intraday.setups import SETUPS
 from intraday.setups.failed_orb import NAME as GATED_SETUP
+from intraday.setups.failed_orb import STUDY_FILE
 from intraday.store import BarStore, read_jsonl
 from intraday.validate import RESEARCH_VERDICTS, SessionVerdict, Verdict
 
@@ -47,7 +46,6 @@ class IntegritySummary(BaseModel):
     research_sessions: int
     symbols: int
     per_symbol_non_research: dict[str, int]
-    missing_slot_counts: dict[str, int]
     daily_rows: int
     daily_corrupt: int
     last_fetch: dict[str, object] | None
@@ -62,8 +60,7 @@ class Report(BaseModel):
     n_breakouts: int
     base_overall: dict[str, float]
     base_by_month: dict[str, dict[str, float]]
-    diagnostic: DiagnosticReport
-    diagnostic_sensitivity: dict[int, DiagnosticReport]
+    study: Study
     backtests: dict[str, BacktestSummary]
     setup_verdicts: dict[str, SetupVerdict]
     gate_closed: bool
@@ -79,12 +76,9 @@ def integrity_summary(
     equities = {k: v for k, v in verdicts.items() if k[0] != index_symbol}
     counts = Counter(v.verdict.value for v in equities.values())
     non_research: Counter[str] = Counter()
-    slots: Counter[str] = Counter()
     for (sym, _), v in equities.items():
         if v.verdict not in RESEARCH_VERDICTS:
             non_research[sym] += 1
-        if v.verdict in (Verdict.PARTIAL, Verdict.TAIL_COLLAPSED):
-            slots.update(v.missing_slots)
     runs = [r for r in fetch_log if r.get("event") == "fetch_run"]
     return IntegritySummary(
         sessions_validated=len(equities),
@@ -92,7 +86,6 @@ def integrity_summary(
         research_sessions=sum(1 for v in equities.values() if v.verdict in RESEARCH_VERDICTS),
         symbols=len({k[0] for k in equities}),
         per_symbol_non_research=dict(sorted(non_research.items())),
-        missing_slot_counts=dict(slots.most_common(6)),
         daily_rows=len(daily_verdicts),
         daily_corrupt=sum(1 for v in daily_verdicts.values() if v.verdict is Verdict.CORRUPT),
         last_fetch=runs[-1] if runs else None,
@@ -100,7 +93,7 @@ def integrity_summary(
 
 
 def setup_verdict(summary: BacktestSummary) -> SetupVerdict:
-    """edge detected: base variant beats random with a CI above zero AND has positive
+    """edge detected: the base variant beats random with a CI above zero AND has positive
     expectancy with a CI above zero at EVERY slippage level. insufficient sample: any
     level lacks an expectancy. no edge: otherwise."""
     base = [v for v in summary.variants if v.variant == "base"]
@@ -115,7 +108,10 @@ def setup_verdict(summary: BacktestSummary) -> SetupVerdict:
 
 def _rates(df: pd.DataFrame) -> dict[str, float]:
     r = base_rates(df).iloc[0]
-    return {"n": float(r["n"]), "SUSTAINED_pct": float(r["SUSTAINED_pct"]), "BUSTED_pct": float(r["BUSTED_pct"]), "NEITHER_pct": float(r["NEITHER_pct"])}
+    return {
+        "n": float(r["n"]), "SUSTAINED_pct": float(r["SUSTAINED_pct"]),
+        "BUSTED_pct": float(r["BUSTED_pct"]), "NEITHER_pct": float(r["NEITHER_pct"]),
+    }
 
 
 # ---- build -------------------------------------------------------------------------------
@@ -127,22 +123,16 @@ def build_report(config: Config) -> Report:
     daily_store = BarStore(data_dir, config.daily_interval)
     verdicts = store.load_verdicts()
     if not verdicts:
-        raise FileNotFoundError(f"{store.verdicts_path} is empty; run fetch first")
+        raise FileNotFoundError(f"{store.verdicts_path} is empty; run update first")
     integrity = integrity_summary(verdicts, daily_store.load_verdicts(), read_jsonl(store.fetch_log_path), config.index_symbol)
 
     breakouts = load_breakouts(data_dir)
     by_month = breakouts.assign(month=breakouts["session_date"].astype(str).str.slice(0, 7))
-    base_by_month = {m: _rates(g) for m, g in by_month.groupby("month")}
 
-    diag_path = data_dir / f"diagnostic_rvol{config.rvol_lookback_sessions}.json"
-    if not diag_path.exists():
-        raise FileNotFoundError(f"{diag_path} not found; run diagnose first")
-    diagnostic = DiagnosticReport.model_validate_json(diag_path.read_text(encoding="utf-8"))
-    sensitivity: dict[int, DiagnosticReport] = {}
-    for p in sorted(data_dir.glob("diagnostic_rvol*.json")):
-        lb = int(p.stem.removeprefix("diagnostic_rvol"))
-        if lb != config.rvol_lookback_sessions:
-            sensitivity[lb] = DiagnosticReport.model_validate_json(p.read_text(encoding="utf-8"))
+    study_path = data_dir / STUDY_FILE
+    if not study_path.exists():
+        raise FileNotFoundError(f"{study_path} not found; run study first")
+    study = Study.model_validate_json(study_path.read_text(encoding="utf-8"))
 
     backtests: dict[str, BacktestSummary] = {}
     for name in SETUPS:
@@ -150,18 +140,17 @@ def build_report(config: Config) -> Report:
         if p.exists():
             backtests[name] = load_backtest(name, data_dir)
         elif name != GATED_SETUP:
-            raise FileNotFoundError(f"{p} not found; run backtest --setup {name} first")
-    gate_closed = GATED_SETUP not in backtests and diagnostic.verdict != "signal"
+            raise FileNotFoundError(f"{p} not found; run study first")
+    gate_closed = GATED_SETUP not in backtests and study.verdict != "signal"
 
     return Report(
         generated_at=datetime.now(tz=IST),
-        config={k: v for k, v in json.loads(config.model_dump_json()).items()},
+        config=json.loads(config.model_dump_json()),
         integrity=integrity,
         n_breakouts=len(breakouts),
         base_overall=_rates(breakouts),
-        base_by_month=base_by_month,
-        diagnostic=diagnostic,
-        diagnostic_sensitivity=sensitivity,
+        base_by_month={m: _rates(g) for m, g in by_month.groupby("month")},
+        study=study,
         backtests=backtests,
         setup_verdicts={name: setup_verdict(s) for name, s in backtests.items()},
         gate_closed=gate_closed,
@@ -171,34 +160,155 @@ def build_report(config: Config) -> Report:
 # ---- render ------------------------------------------------------------------------------
 
 
+def _headline(report: Report) -> list[str]:
+    """The four sentences. Everything below them is supporting detail."""
+    i = report.integrity
+    o = report.base_overall
+    lines = [
+        f"1. Data: {i.research_sessions} usable sessions out of {i.sessions_validated} across {i.symbols} symbols. "
+        f"{i.sessions_validated - i.research_sessions} rejected, {i.daily_corrupt} bad daily rows quarantined.",
+        f"2. Of {report.n_breakouts} breakouts: {o['BUSTED_pct']:.0f}% failed, {o['SUSTAINED_pct']:.0f}% ran, "
+        f"{o['NEITHER_pct']:.0f}% did neither"
+        + (f", across {len(report.base_by_month)} months ("
+           + ", ".join(f"{m} {r['BUSTED_pct']:.0f}%" for m, r in report.base_by_month.items()) + " failed)." if report.base_by_month else "."),
+    ]
+    # Lead with a feature the study could actually test. An untestable feature can show a
+    # huge gap on a handful of failures, and putting that first would sell a non-finding.
+    testable = [f for f in report.study.findings if f.testable]
+    if testable:
+        best = max(testable, key=lambda f: f.overall.gap_pct)
+        lo, hi = best.overall.thirds[0], best.overall.thirds[-1]
+        lines.append(
+            f"3. Failure rate by {best.feature}:  low {lo.bust_rate_pct:.0f}%  |  "
+            f"mid {best.overall.thirds[1].bust_rate_pct:.0f}%  |  high {hi.bust_rate_pct:.0f}%   "
+            f"(overall {best.overall.base_rate_pct:.0f}%)."
+            + (" The gap holds in both halves." if best.holds else " The gap does not hold in both halves.")
+            + f" Verdict: {report.study.verdict.replace('_', ' ')}."
+        )
+        untestable = [f.feature for f in report.study.findings if not f.testable]
+        if untestable:
+            lines.append(
+                f"   ({', '.join(untestable)} could not be tested: fewer than {report.study.min_half_busts} "
+                "failures in a half where the feature exists. Any gap they show is not a finding.)"
+            )
+    else:
+        lines.append(
+            f"3. No feature could be tested: none has {report.study.min_half_busts} failed breakouts in both "
+            f"halves where it exists. Verdict: {report.study.verdict.replace('_', ' ')}."
+        )
+    for name, s in report.backtests.items():
+        mid = next((v for v in s.variants if v.variant == "base" and v.slippage_bps == 10), None)
+        if mid is None or mid.overall is None:
+            lines.append(f"4. Trading {name}: not enough trades for an expectancy.")
+            continue
+        lines.append(
+            f"4. Trading {name}: {mid.overall.expectancy_r:+.2f}R per trade at 10bps. "
+            f"Random entries: {mid.edge.mean_random_r:+.2f}R. "
+            + ("The rule adds nothing." if mid.edge.indistinguishable_from_zero
+               else f"The rule adds {mid.edge.edge_r:+.2f}R.")
+            + f" {mid.overall.breakeven_failure_rate * 100:.0f}% of trades never reach +0.5R."
+        )
+    return lines
+
+
+def render_plain_summary(study: Study, console: Console, min_sample: int) -> None:
+    """Human-readable conclusion, printed BEFORE the statistical tables.
+
+    The tables exist to audit the result. This block exists to read it.
+    A reader who stops here must still have the correct conclusion.
+    """
+    colour = {"insufficient_sample": "yellow", "no_signal": "red", "signal": "green"}[study.verdict]
+    console.print()
+    if study.verdict == "insufficient_sample":
+        console.print(f"[bold {colour}]Not enough data to answer the question yet.[/bold {colour}]")
+        console.print(
+            f"  No feature has {min_sample} failed breakouts in both halves of the period, so none could be "
+            "tested either way. Failures per half, where each feature exists:"
+        )
+        for f in study.findings:
+            first = f.first_half.busts if f.first_half else 0
+            second = f.second_half.busts if f.second_half else 0
+            console.print(f"    {f.feature}: {first} then {second}")
+        console.print("  Collect more sessions, then run this again.")
+        console.print("  The tables below describe what happened. They are not evidence of what happens next.")
+    elif study.verdict == "no_signal":
+        console.print(f"[bold {colour}]No predictive signal was found.[/bold {colour}]")
+        console.print(
+            f"  Each feature was cut into thirds and the failure rate counted in each. To count, a feature's "
+            f"low-third to high-third gap must be at least {MIN_GAP_PCT:.0f} percentage points in both halves "
+            f"of the period - the second half being data the pattern was not chosen on."
+        )
+        untestable = [f.feature for f in study.findings if not f.testable]
+        if untestable:
+            console.print(
+                f"  No feature managed that. {', '.join(untestable)} could not be tested at all: fewer than "
+                f"{min_sample} failures in a half where the feature exists."
+            )
+        else:
+            console.print("  No feature managed that.")
+        console.print(
+            f"  Of {study.n_breakouts} breakouts, {study.base_rate_pct:.1f}% failed. Knowing the feature "
+            f"values does not tell you which ones."
+        )
+        console.print(f"  [bold {colour}]This is a real result: do not trade this setup.[/bold {colour}]")
+    else:
+        held = ", ".join(f.feature for f in study.findings if f.holds)
+        console.print(f"[bold {colour}]A signal was found.[/bold {colour}]")
+        console.print(
+            f"  Of {study.n_breakouts} breakouts, {study.base_rate_pct:.1f}% failed overall. {held} still "
+            f"separates failures from the rest in the second half of the period - data the pattern was not "
+            f"chosen on."
+        )
+        console.print("  Strongest separation first:")
+        for f in sorted(study.findings, key=lambda f: -abs(f.overall.gap_pct))[:3]:
+            lo, hi = f.overall.thirds[0], f.overall.thirds[-1]
+            direction = "lower" if f.overall.gap_pct > 0 else "higher"
+            console.print(
+                f"    {f.feature}: {direction} values fail more - low third {lo.bust_rate_pct:.0f}%, high "
+                f"third {hi.bust_rate_pct:.0f}% (gap {f.overall.gap_pct:+.0f} points)"
+            )
+        console.print(
+            "  A signal in the data is not by itself a tradeable edge: this measures separation only, and "
+            "does not account for costs or execution."
+        )
+    console.print()
+    console.print(f"  verdict: [bold {colour}]{study.verdict}[/bold {colour}]")
+    console.print(f"  {study.statement}")
+
+
 def render_report(report: Report, console: Console) -> None:
     c = report.config
     console.rule("[bold]Intraday research report - NSE opening-range breakouts")
     console.print(
         f"generated {report.generated_at:%Y-%m-%d %H:%M} IST | source {c['source']} | interval {c['interval']} | "
-        f"opening range {c['opening_range_minutes']}m | thresholds sustain >= {c['sustain_extension_atr']} ATR, "
-        f"bust < {c['bust_extension_atr']} ATR | slippage {c['slippage_bps']} bps | min sample {c['min_sample']} | "
-        f"rvol lookback {c['rvol_lookback_sessions']} | stop {c['stop_atr_multiple']} ATR | position Rs {c['position_inr']:,.0f}"
+        f"opening range {c['opening_range_minutes']}m | fail < {c['bust_extension_atr']} ATR, run >= "
+        f"{c['sustain_extension_atr']} ATR | slippage {c['slippage_bps']} bps | min sample {c['min_sample']} | "
+        f"stop {c['stop_atr_multiple']} ATR | position Rs {c['position_inr']:,.0f}"
     )
 
+    render_plain_summary(report.study, console, int(c["min_sample"]))
+    console.print("[dim]Detail below - for auditing the result above.[/dim]")
+
+    console.print("\n[bold]In four sentences[/bold]")
+    for line in _headline(report):
+        console.print(f"  {line}")
+
     console.print("\n[bold]Verdicts[/bold]")
-    console.print(f"  diagnostic (does anything predict busts out of sample?): [bold]{report.diagnostic.verdict}[/bold]")
+    console.print(f"  does anything separate failed breakouts?  [bold]{report.study.verdict}[/bold]")
     for name, v in report.setup_verdicts.items():
-        console.print(f"  setup {name}: [bold]{v}[/bold]")
+        console.print(f"  setup {name}:  [bold]{v}[/bold]")
     if report.gate_closed:
-        console.print(f"  setup {GATED_SETUP}: [bold]gate closed[/bold] (requires a 'signal' diagnostic verdict)")
+        console.print(f"  setup {GATED_SETUP}:  [bold]gate closed[/bold] (needs a 'signal' verdict above)")
 
     i = report.integrity
     console.print("\n[bold]1. Data integrity[/bold]")
     console.print(
-        f"  {i.sessions_validated} equity sessions validated across {i.symbols} symbols: "
+        f"  {i.sessions_validated} equity sessions across {i.symbols} symbols: "
         + "  ".join(f"{k} {v}" for k, v in i.verdict_counts.items())
         + f"  -> research set {i.research_sessions}"
     )
-    if i.missing_slot_counts:
-        console.print("  slots missing (PARTIAL/TAIL_COLLAPSED): " + ", ".join(f"{k} x{v}" for k, v in i.missing_slot_counts.items()))
     if i.per_symbol_non_research:
-        console.print("  non-research sessions per symbol: " + ", ".join(f"{k} {v}" for k, v in i.per_symbol_non_research.items()))
+        console.print("  rejected per symbol: " + ", ".join(f"{k} {v}" for k, v in i.per_symbol_non_research.items()))
     console.print(f"  daily bars: {i.daily_rows} rows, {i.daily_corrupt} CORRUPT (quarantined)")
     if i.last_fetch:
         lf = i.last_fetch
@@ -206,32 +316,64 @@ def render_report(report: Report, console: Console) -> None:
 
     console.print(f"\n[bold]2. Base rates[/bold]  ({report.n_breakouts} breakouts)")
     t = Table()
-    for col in ("period", "n", "SUSTAINED %", "BUSTED %", "NEITHER %"):
+    for col in ("period", "n", "ran %", "failed %", "neither %"):
         t.add_column(col, justify="left" if col == "period" else "right")
     o = report.base_overall
     t.add_row("all", f"{o['n']:.0f}", f"{o['SUSTAINED_pct']:.1f}", f"{o['BUSTED_pct']:.1f}", f"{o['NEITHER_pct']:.1f}")
     for m, r in report.base_by_month.items():
         t.add_row(m, f"{r['n']:.0f}", f"{r['SUSTAINED_pct']:.1f}", f"{r['BUSTED_pct']:.1f}", f"{r['NEITHER_pct']:.1f}")
     console.print(t)
+    console.print(
+        "  [dim]How to read: shares of every labelled breakout, overall and by month. 'failed' and 'ran' "
+        "mean the ATR thresholds in the header line above, not profit or loss.[/dim]"
+    )
     console.print(f"  breakeven failure rate (Bulkowski) for this definition: {o['BUSTED_pct']:.1f}%")
 
-    console.print("\n[bold]3. Diagnostic[/bold]")
-    render_diagnostic(report.diagnostic, console, f"rvol lookback {c['rvol_lookback_sessions']} (as specified)")
-    for lb, d in report.diagnostic_sensitivity.items():
-        console.print(
-            f"\n  sensitivity run, rvol lookback {lb}: verdict {d.verdict}; train AUC {d.train_auc:.3f}, "
-            f"test AUC {d.test_auc:.3f} (CI {d.test_auc_ci[0]:.3f}-{d.test_auc_ci[1]:.3f}); "
-            f"{d.n_test} test rows, bust rate {d.base_rate_test:.1%}"
-        )
+    console.print("\n[bold]3. What separates a failed breakout[/bold]")
+    render_study(report.study, console)
 
-    console.print("\n[bold]4-6. Edge vs benchmark, expectancy, segments[/bold]")
+    console.print("\n[bold]4. Cost of trading it[/bold]")
     for name, s in report.backtests.items():
         render_backtest(s, console)
     if report.gate_closed:
-        console.print(f"\n  {GATED_SETUP}: not run - the Stage 6 gate is closed (verdict {report.diagnostic.verdict}).")
+        console.print(f"\n  {GATED_SETUP}: not run - the gate is closed (verdict {report.study.verdict}).")
 
-    console.print("\n[bold]7. Caveats[/bold]")
+    console.print("\n[bold]5. Caveats[/bold]")
     console.print(CAVEATS, markup=False, highlight=False)
+
+
+def render_study(study: Study, console: Console) -> None:
+    console.print(
+        f"  {study.n_breakouts} breakouts, {study.base_rate_pct:.1f}% failed overall. "
+        + (f"Halves split at {study.split_date}; second half holds {study.second_half_busts} failures."
+           if study.split_date else "Too few dates to split into halves.")
+    )
+    for f in study.findings:
+        t = Table(title=f"{f.feature} - {FEATURE_MECHANISM[f.feature]}")
+        for col in ("rows", "third", "range", "n", "failed", "fail rate", "vs overall"):
+            t.add_column(col, justify="left" if col in ("rows", "third", "range") else "right")
+        for table in (f.overall, f.first_half, f.second_half):
+            if table is None:
+                continue
+            for third in table.thirds:
+                t.add_row(
+                    table.scope, third.name, f"{third.lower:.2f} - {third.upper:.2f}", str(third.n), str(third.busts),
+                    f"{third.bust_rate_pct:.1f}%", f"{third.bust_rate_pct - table.base_rate_pct:+.1f}",
+                )
+        console.print(t)
+        console.print(
+            "  [dim]How to read: each third holds a third of the breakouts, cut by feature value. "
+            "'vs overall' is the column that matters - a fail rate is only meaningful against the rate "
+            "for these rows, so 25% against a 20% base is nearly nothing. The gap must hold in BOTH "
+            "halves to count.[/dim]"
+        )
+        colour = "green" if f.holds else ("red" if not f.testable else "yellow")
+        console.print(f"  [{colour}]{f.statement}")
+    console.print(f"\n  [bold]{study.statement}")
+    console.print(
+        f"  (a feature counts only if it has {study.min_half_busts} failures in each half AND a low-vs-high "
+        f"gap of at least {MIN_GAP_PCT:.0f} points in both)"
+    )
 
 
 def save_report_text(console: Console, data_dir: Path) -> Path:

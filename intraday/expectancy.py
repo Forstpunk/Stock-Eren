@@ -108,7 +108,7 @@ def entry_half_hour(t: time) -> str:
 def segment_keys(results: pd.DataFrame, config: Config) -> pd.DataFrame:
     """Add the three segment columns to a results frame (from ``trades.results_frame``)."""
     out = results.copy()
-    out["seg_rvol"] = [rvol_bucket(v, config.rvol_threshold) for v in out["rvol_breakout_bar"]]
+    out["seg_rvol"] = [rvol_bucket(v, config.rvol_threshold) for v in out["rvol_breakout_bar"]]  # from features
     out["seg_or_width"] = or_width_quartiles(out["or_width_atr"])
     out["seg_half_hour"] = [entry_half_hour(pd.Timestamp(t).time()) for t in out["entry_time"]]
     return out

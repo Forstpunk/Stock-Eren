@@ -174,12 +174,15 @@ def test_s2_trade_is_the_reversal_with_original_features(config: Config) -> None
 
 
 def test_s2_gate(tmp_path: Path, config: Config) -> None:
+    from intraday.setups.failed_orb import STUDY_FILE
+
     with pytest.raises(GateClosedError, match="not found"):
         assert_gate_open(tmp_path, config)
-    path = tmp_path / f"diagnostic_rvol{config.rvol_lookback_sessions}.json"
-    path.write_text(json.dumps({"verdict": "insufficient_sample"}), encoding="utf-8")
-    with pytest.raises(GateClosedError, match="research gate"):
-        assert_gate_open(tmp_path, config)
+    path = tmp_path / STUDY_FILE
+    for closed in ("insufficient_sample", "no_signal"):
+        path.write_text(json.dumps({"verdict": closed}), encoding="utf-8")
+        with pytest.raises(GateClosedError, match="research gate"):
+            assert_gate_open(tmp_path, config)
     path.write_text(json.dumps({"verdict": "signal"}), encoding="utf-8")
     assert assert_gate_open(tmp_path, config) == "signal"
 
@@ -203,27 +206,27 @@ def test_run_setup_end_to_end(tmp_path: Path, config: Config) -> None:
     daily_store.put_sessions("AAA", [
         (validate_daily_row(r, "AAA", d, TEST_CALENDAR, FETCHED_LATER), r) for d, r in daily.groupby(daily.index.date)
     ])
-    from intraday.features import FEATURE_NAMES
+    from intraday.features import ALL_COLUMNS
     from intraday.labelling import label_breakouts
 
     events, _ = label_breakouts(hist, "AAA", daily, TEST_CALENDAR, config)
     features = pd.DataFrame([{
         "symbol": e.symbol, "session_date": e.session_date, "direction": e.direction,
-        **{f: float(k) for k, f in enumerate(FEATURE_NAMES)},
+        **{f: float(k) for k, f in enumerate(ALL_COLUMNS)},
     } for e in events])
     run = run_setup("orb", store, daily_store, features, TEST_CALENDAR, config, tmp_path)
     assert run.sessions_seen == 6 and run.sessions_without_atr == 0
     assert run.trades and len(run.trades) % 2 == 0
     for t in run.trades:
         assert t.entry_time.time() >= config.first_entry_time and t.entry_time.time() <= config.last_entry_time
-        assert set(t.features) == set(FEATURE_NAMES)
+        assert set(t.features) == set(ALL_COLUMNS)
     with pytest.raises(GateClosedError):
         run_setup("failed_orb", store, daily_store, features, TEST_CALENDAR, config, tmp_path)
 
 
 def test_run_backtest_end_to_end(tmp_path: Path, config: Config) -> None:
     from intraday.backtest import load_backtest, run_backtest, save_backtest
-    from intraday.features import FEATURE_NAMES
+    from intraday.features import ALL_COLUMNS
     from intraday.labelling import label_breakouts
 
     store, daily_store = BarStore(tmp_path, "5m"), BarStore(tmp_path, "1d")
@@ -240,7 +243,7 @@ def test_run_backtest_end_to_end(tmp_path: Path, config: Config) -> None:
     for sym in ("AAA", "BBB"):
         events, _ = label_breakouts(store.read_research(sym), sym, daily_store.read_research(sym), TEST_CALENDAR, config)
         rows += [{"symbol": e.symbol, "session_date": e.session_date, "direction": e.direction,
-                  **{f: float(k) for k, f in enumerate(FEATURE_NAMES)}} for e in events]
+                  **{f: float(k) for k, f in enumerate(ALL_COLUMNS)}} for e in events]
     features = pd.DataFrame(rows)
     summary, table = run_backtest("orb", (5, 20), store, daily_store, features, TEST_CALENDAR, config, tmp_path)
     assert summary.slippage_bps == (5, 20) and len(summary.variants) == 4
