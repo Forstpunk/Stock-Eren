@@ -109,8 +109,8 @@ def test_index_breakout_state_has_no_lookahead(index_bars: pd.DataFrame, config:
     change what the index had done by the decision stamp."""
     start = last_session_start(index_bars)
 
-    def fn(b: pd.DataFrame, i: int) -> float:
-        return float(index_breakout_state(b, b.index[i], config))
+    def fn(b: pd.DataFrame, i: int) -> dict[str, float]:
+        return {d: index_breakout_state(b, b.index[i], d, config) for d in ("long", "short")}
 
     assert_no_lookahead_sweep(fn, index_bars, range(start + 3, len(index_bars)))
     assert_blind_to_poison(fn, index_bars)
@@ -188,11 +188,10 @@ def test_hand_computed_values(
 def test_index_or_agrees_matches_the_index_state(bars: pd.DataFrame, ctx: FeatureContext, config: Config) -> None:
     i = last_session_start(bars) + 10
     ts = bars.index[i]
-    state = index_breakout_state(ctx.index_bars, ts, config)
-    long = compute_features(bars, i, "long", ctx)["index_or_agrees"]
-    short = compute_features(bars, i, "short", ctx)["index_or_agrees"]
-    assert long == (1.0 if state == 1 else 0.0)
-    assert short == (1.0 if state == -1 else 0.0)
+    for d in ("long", "short"):
+        assert compute_features(bars, i, d, ctx)["index_or_agrees"] == index_breakout_state(
+            ctx.index_bars, ts, d, config
+        )
 
 
 def test_signed_features_flip_with_direction(bars: pd.DataFrame, ctx: FeatureContext) -> None:
@@ -285,3 +284,44 @@ def test_rvol_nan_without_enough_sessions(
     f = compute_features(short_hist, last_session_start(short_hist) + 10, "long", ctx)
     assert math.isnan(f["rvol_open_15m"]) and math.isnan(f["rvol_breakout_bar"])
     assert not math.isnan(f["or_width_atr"])
+
+
+def test_index_state_counts_any_close_beyond_the_range_either_way(config: Config) -> None:
+    """The pre-registered question is "has the index closed beyond its range this way",
+    not "which way did it break first". An index that breaks up and then down has done
+    both, and a stock breaking either way at that point is not fighting it."""
+    from tests.test_labelling import flat_session, set_bar
+
+    df = flat_session()  # OR [99, 101] over the first three bars
+    set_bar(df, 10, 100.5, 101.6, 100.4, 101.5)  # closes above the range at 10:05
+    set_bar(df, 30, 99.5, 99.6, 98.4, 98.6)  # and below it at 11:45
+
+    before_any = df.index[5]
+    after_up = df.index[12]
+    after_both = df.index[32]
+
+    assert index_breakout_state(df, before_any, "long", config) == 0.0
+    assert index_breakout_state(df, before_any, "short", config) == 0.0
+
+    assert index_breakout_state(df, after_up, "long", config) == 1.0
+    assert index_breakout_state(df, after_up, "short", config) == 0.0, "the down break has not happened yet"
+
+    # after both: the earlier up-break must not hide the later down-break, and vice versa
+    assert index_breakout_state(df, after_both, "long", config) == 1.0
+    assert index_breakout_state(df, after_both, "short", config) == 1.0
+
+
+def test_index_state_is_nan_before_the_range_completes(config: Config) -> None:
+    from tests.test_labelling import flat_session
+
+    df = flat_session()
+    assert math.isnan(index_breakout_state(df, df.index[1], "long", config))
+    assert math.isnan(index_breakout_state(df.iloc[0:0], df.index[10], "long", config))
+
+
+def test_index_state_rejects_a_bad_direction(config: Config) -> None:
+    from tests.test_labelling import flat_session
+
+    df = flat_session()
+    with pytest.raises(ValueError, match="direction must be"):
+        index_breakout_state(df, df.index[10], "up", config)

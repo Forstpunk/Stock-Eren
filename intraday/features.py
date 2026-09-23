@@ -167,12 +167,8 @@ def compute_features(bars: pd.DataFrame, i: int, direction: Direction, ctx: Feat
         index_move = float(index_row["close"]) / index_open - 1.0
         rel_strength = sign * (stock_move - index_move) * 100.0  # percentage points
 
-    # --- has the index broken its own opening range the same way, by now?
-    state = index_breakout_state(ctx.index_bars, ts, cfg)
-    if isinstance(state, float) and math.isnan(state):
-        index_agrees = math.nan
-    else:
-        index_agrees = 1.0 if state == (1 if direction == "long" else -1) else 0.0
+    # --- has the index closed beyond its own opening range the same way, by now?
+    index_agrees = index_breakout_state(ctx.index_bars, ts, direction, cfg)
 
     # --- overnight gap in ATR units, signed. Derived from gap_pct alone so there is one
     #     definition of "the previous close" rather than two that can disagree.
