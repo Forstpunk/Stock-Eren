@@ -107,7 +107,7 @@ the reason, so a later result can never be quietly explained by a rule that move
 | 2026-09-23 | **Random twin is now stopped.** | The benchmark twin had no stop, so its losses could run past −1R while the strategy's could not. That flattered the strategy by comparison. The twin now uses the same stop rule, capped at the matched duration. This makes reported edge vs random smaller, and correct. |
 | 2026-09-23 | **Gap-through stops fill at the bar's open.** | A bar that opens beyond the stop never offered the stop price. Filling at the stop credited trades with prices that were not available. |
 | 2026-09-23 | **GST now applies to the SEBI fee.** | It always did in reality; the model omitted it. Round-trip cost on a ₹50,000 flat trade at 10 bps moves from ₹153.0046 to ₹153.0226. |
-| 2026-09-23 | **RVOL lookback: 20 → 14 sessions.** | Taken from Zarattini & Aziz, who define relative volume against the previous 14 days, and pre-registered in RESEARCH.md before implementation. Not chosen from our results. It also lifts the rows where RVOL exists from 347 of 840 to 493, which is what made the feature testable in both periods at all. |
+| 2026-09-23 | **RVOL lookback: 20 → 14 sessions.** | Taken from Zarattini & Aziz, who define relative volume against the previous 14 days. Pre-registered in RESEARCH.md before implementation and chosen from that source alone, not from our results. Stated as a consequence, not a reason: it changes the rows where RVOL exists from 347 of 840 to 493. |
 | 2026-09-23 | **Bootstrap unit: trade → session.** Every confidence interval (forecast skill, edge vs random, expectancy) now resamples whole sessions rather than individual trades. | Breakouts on the same session share that day's market-wide shock. Resampling rows treats them as independent, which makes intervals far too narrow and can declare an edge that is not there. Measured on synthetic data with zero true effect and a realistic session shock, row resampling produced a false-positive rate well above the nominal 5%; session resampling stays near it. |
 
 ## Data-quality facts learned on yfinance (Sep 2026)
@@ -130,18 +130,19 @@ calibration table of what it said against what happened.
 The rule is a lookup table — the failure rate of each third of each feature in the
 training window — so any prediction can be checked by hand from the printed buckets.
 
-On the current data it scores **+3.2% skill (95% CI +1.0% to +5.1%)** over 408 forecasts:
-the breakouts it called safest failed 12% of the time, the ones it called riskiest 26%.
-That is a genuine out-of-sample signal, and it is still smaller than the ₹150 round-trip
-cost, so it does not turn into profit. See RESEARCH.md.
+Run `study`; the current forecast skill and its session-bootstrap interval are in
+`data/report.txt`. Figures are deliberately not repeated here, because a number copied into
+a README is a number that goes stale the next time the pipeline runs.
 
 ## Current result
 
-On 41 sessions x 20 symbols: 20% of breakouts failed, stable month to month. The baseline
-ORB+VWAP setup is indistinguishable from random entries and loses 0.12–0.29R per trade to
-costs at 5–20 bps.
+Run the two commands above and read `data/report.txt`. The verdict, the base rates, the
+forecast skill and the cost of trading it all live there and all move as the data does, so
+they are not duplicated here.
 
-See `data/report.txt` after a run for the current verdict; it moves as the data does.
+What is stable enough to state: costs are the binding constraint. A round trip on a
+₹50,000 position costs 20.6–50.6 bps of turnover at 5–20 bps slippage, and any edge has to
+clear that before it is worth anything.
 
 That is a limit of the data, not of the method. yfinance serves a rolling 60 days, so the
 sample cannot grow past this.

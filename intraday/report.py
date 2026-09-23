@@ -639,11 +639,17 @@ def render_forecast(score: ForecastScore, console: Console) -> None:
         f"-> skill {score.skill:+.1%} (95% CI {score.skill_ci[0]:+.1%} to {score.skill_ci[1]:+.1%})."
     )
     eff = effective_sample_size(score.n, score.n_sessions, score.session_variance_share)
+    floor = score.n_sessions / score.n if score.n else 0.0
     console.print(
         f"  Clustering: {score.session_variance_share:.1%} of the failure/no-failure variance is explained by "
-        f"which session it was. Across {score.n_sessions} sessions that makes {score.n} breakouts worth about "
-        f"{eff:.0f} independent ones, which is why the interval above resamples whole sessions rather than "
-        "individual breakouts."
+        f"which session it was. Across {score.n_sessions} sessions that makes {score.n} breakouts worth roughly "
+        f"{eff:.0f} independent ones - a rough, conservative figure from the standard design effect, not a "
+        "precise count. It is why the interval above resamples whole sessions rather than individual breakouts."
+    )
+    console.print(
+        f"  [dim]The variance share has a noise floor of about sessions/rows ({floor:.1%} here): even with no "
+        "real clustering, session means differ by chance, so a small reading is not evidence that clustering "
+        "is absent.[/dim]"
     )
     table = Table(title="Calibration: what it said against what happened")
     for col in ("forecast band", "n", "average forecast", "actually failed", "difference"):

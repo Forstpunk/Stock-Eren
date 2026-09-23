@@ -183,11 +183,28 @@ significant" would be a coin flip dressed up as a finding.
 
 ## Multiple testing
 
-Round 1 tested 3 features. Round 2 tests 5 directional ones (the two-sided pair excluded
-from the verdict). Under the two-period rule each feature has its own chance of passing by
-luck, so with five features the chance that **at least one** does is roughly five times a
-single feature's — for an individual false-positive rate of about 5%, that is roughly 23%.
+The directional features are whatever `features.FEATURE_NAMES` holds; after
+`breakout_depth_atr` was withdrawn (see above) that is **six**:
 
-The report must therefore state how many features were tested. A `signal` verdict resting
-on one feature out of five is weaker evidence than the same verdict resting on one out of
-one, and the reader cannot judge that without the count.
+    rvol_open_15m, rvol_breakout_bar, bar_body_ratio,
+    rel_strength_vs_index, index_or_agrees, gap_atr_signed
+
+Under the two-period rule each feature has its own chance of passing by luck. Treating them
+as independent, the chance that **at least one** of `n` passes is `1 − 0.95ⁿ` for an
+individual false-positive rate of 5%:
+
+| n directional features | 1 − 0.95ⁿ |
+|---|---|
+| 1 | 5% |
+| 3 | 14% |
+| 6 | **26%** |
+| 7 | 30% |
+
+Six features therefore carry about a 26% chance that one survives the two-period rule on
+noise alone. The features are correlated (the two RVOL measures especially), so the true
+figure is lower than the independent bound, but it is not small.
+
+The report states how many features were tested and quotes this figure, because a `signal`
+verdict resting on one feature out of six is weaker evidence than the same verdict resting
+on one out of one, and the reader cannot judge that without the count. `analysis._family_error`
+computes it, so the number in the report and the number here cannot drift apart.
