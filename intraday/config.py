@@ -86,10 +86,15 @@ class Config(BaseModel):
     slippage_bps: tuple[int, ...] = (5, 10, 20)
     min_sample: int = Field(default=30, gt=0)
     rvol_threshold: float = Field(default=2.0, gt=0)
-    # Reserved for the stocks-in-play universe filter (RESEARCH.md item 1); not used yet.
-    gap_threshold_pct: float = Field(default=1.0, gt=0)
+
+    # The stocks-in-play universe filter (RESEARCH.md item 1). A name must have cleared all
+    # of these on the PREVIOUS session to be considered, so selection never uses anything
+    # from the session being traded except the opening relative volume itself.
+    min_price_inr: float = Field(default=50.0, gt=0)
     atr_pct_threshold: float = Field(default=1.5, gt=0)
     turnover_threshold_inr: float = Field(default=10 * 1e7, gt=0)  # Rs 10 crore
+    stocks_in_play: int = Field(default=20, gt=0)  # how many to trade per session
+    gap_threshold_pct: float = Field(default=1.0, gt=0)  # reserved; not used yet
 
     # A daily bar whose open sits outside this ratio of the previous close is flagged
     # SUSPECT: usually an unadjusted split, bonus or demerger rather than a real move.

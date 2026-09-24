@@ -115,6 +115,14 @@ Zarattini & Aziz but carry no published validation.
 1. **Select the universe daily by relative volume** instead of using a fixed list. This is
    the literature's actual claim and the one we have not tested. Needs a wider candidate
    pool (~200 liquid NSE names) and therefore more data than yfinance's 60 days.
+
+   **Implemented and pre-registered on 2026-09-24, not yet run**, in `intraday/universe.py`.
+   Eligibility is judged on the previous session only: close ≥ `min_price_inr` (₹50),
+   prior-day ATR ≥ `atr_pct_threshold` (1.5%) of that close, and previous-session turnover
+   ≥ `turnover_threshold_inr` (₹10 cr). Survivors are ranked by relative volume through the
+   end of the opening range and the top `stocks_in_play` (20) are traded. Thresholds are
+   fixed here before any run and are not to be tuned on results. A session where nothing
+   qualifies trades nothing.
 2. **Use a 14-day RVOL lookback**, per the source. On 41 sessions this alone lifts the
    rows where RVOL exists from 347/840 to a usable fraction earlier in the sample.
 3. **Stop at 2 × ATR**, per the source, rather than 1 × ATR.
