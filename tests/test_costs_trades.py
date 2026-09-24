@@ -110,3 +110,55 @@ def test_results_frame_carries_features(config: Config) -> None:
     df = results_frame([evaluate(make_trade(), 10, config)])
     assert df.loc[0, "rvol_breakout_bar"] == 1.2 and df.loc[0, "r_net"] < 1.0
     assert "cost_slippage" in df.columns
+
+
+# ---- participation-aware slippage --------------------------------------------------------
+
+
+def test_slippage_widens_with_the_order_share_of_the_bar() -> None:
+    """A flat bps figure says a Rs 50,000 order costs the same in a bar that traded Rs 2 cr
+    as in one that traded Rs 5 lakh. It does not, and the error flatters the backtest:
+    thin bars are exactly where a strategy's fills are worst."""
+    from intraday.costs import IMPACT_COEFFICIENT_BPS, participation_slippage_bps
+
+    base = 10.0
+    tiny = participation_slippage_bps(50_000, 20_000_000, base)  # 0.25% of the bar
+    chunky = participation_slippage_bps(50_000, 500_000, base)  # 10% of the bar
+    assert base < tiny < chunky
+    # the base rate dominates the total, so compare the impact each one adds
+    assert (chunky - base) > 5 * (tiny - base)
+
+    # the square-root shape, checkable by hand
+    assert participation_slippage_bps(250_000, 1_000_000, base) == pytest.approx(
+        base + IMPACT_COEFFICIENT_BPS * 0.5  # sqrt(0.25) = 0.5
+    )
+    assert participation_slippage_bps(1_000_000, 1_000_000, base) == pytest.approx(
+        base + IMPACT_COEFFICIENT_BPS
+    )
+
+
+def test_participation_is_capped_rather_than_extrapolated() -> None:
+    """Past 100% of a bar the model has nothing useful to say, so it stops rather than
+    inventing precision."""
+    from intraday.costs import participation_slippage_bps
+
+    at_full = participation_slippage_bps(1_000_000, 1_000_000, 10.0)
+    beyond = participation_slippage_bps(50_000_000, 1_000_000, 10.0)
+    assert beyond == pytest.approx(at_full)
+
+
+def test_unknown_bar_value_falls_back_to_the_flat_assumption() -> None:
+    """No imputation: without a bar value the flat figure is returned, not a guess."""
+    from intraday.costs import participation_slippage_bps
+
+    assert participation_slippage_bps(50_000, 0.0, 10.0) == 10.0
+    assert participation_slippage_bps(50_000, None, 10.0) == 10.0  # type: ignore[arg-type]
+
+
+def test_participation_slippage_rejects_nonsense() -> None:
+    from intraday.costs import participation_slippage_bps
+
+    with pytest.raises(ValueError):
+        participation_slippage_bps(0, 1_000_000, 10.0)
+    with pytest.raises(ValueError):
+        participation_slippage_bps(50_000, 1_000_000, -1.0)
