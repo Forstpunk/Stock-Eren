@@ -72,6 +72,7 @@ class Report(BaseModel):
     backtests: dict[str, BacktestSummary]
     setup_verdicts: dict[str, SetupVerdict]
     gate_closed: bool
+    stale_backtests: tuple[str, ...]  # artifacts older than features.parquet, refused
     n_sessions: int
     first_date: str
     last_date: str
@@ -152,13 +153,21 @@ def build_report(config: Config) -> Report:
     study = Study.model_validate_json(study_path.read_text(encoding="utf-8"))
 
     backtests: dict[str, BacktestSummary] = {}
+    stale_backtests: list[str] = []
     gate_closed = study.verdict != "signal"
+    features_mtime = (data_dir / "features.parquet").stat().st_mtime
     for name in SETUPS:
         p = data_dir / f"backtest_{name}.json"
         if name == GATED_SETUP and gate_closed:
             # A result left over from a run when the gate was open is not a current result.
             continue
         if p.exists():
+            # An artifact older than the features it claims to describe was computed against
+            # different data. A run killed part-way leaves exactly that, and blending two eras
+            # in one report is worse than having no number at all.
+            if p.stat().st_mtime < features_mtime:
+                stale_backtests.append(name)
+                continue
             backtests[name] = load_backtest(name, data_dir)
         elif name != GATED_SETUP:
             raise FileNotFoundError(f"{p} not found; run study first")
@@ -193,6 +202,7 @@ def build_report(config: Config) -> Report:
         backtests=backtests,
         setup_verdicts=verdicts_by_setup,
         gate_closed=gate_closed,
+        stale_backtests=tuple(stale_backtests),
         n_sessions=len(dates),
         first_date=dates[0] if dates else "-",
         last_date=dates[-1] if dates else "-",
@@ -426,6 +436,11 @@ def render_report(report: Report, console: Console) -> None:
         console.print(f"  setup {name}:  [bold]{v}[/bold]")
     if report.gate_closed:
         console.print(f"  setup {GATED_SETUP}:  [bold]gate closed[/bold] (needs a 'signal' verdict above)")
+    for name in report.stale_backtests:
+        console.print(
+            f"  [red]setup {name}: NOT REPORTED - its saved results are older than the current "
+            "features, so they describe different data. Re-run study."
+        )
 
     i = report.integrity
     console.print("\n[bold]1. Data integrity[/bold]")

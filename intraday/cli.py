@@ -58,9 +58,17 @@ def cmd_study(args: argparse.Namespace, config: Config) -> int:
     from intraday.trading_calendar import TradingCalendar
 
     console = Console()
-    store = BarStore(config.data_dir, config.interval)
-    daily_store = BarStore(config.data_dir, config.daily_interval)
+    store = BarStore.for_config(config, config.interval)
+    daily_store = BarStore.for_config(config, config.daily_interval)
     calendar = TradingCalendar.from_csv(config.data_dir / "nse_holidays.csv")
+    if config.holdout_from is not None:
+        if store.sealed:
+            console.print(f"[green]holdout sealed: sessions from {config.holdout_from} are not readable")
+        else:
+            console.print(
+                f"[red]HOLDOUT UNSEALED: sessions from {config.holdout_from} are included. "
+                "Everything below is in-sample from here on."
+            )
 
     console.print("labelling breakouts ...")
     breakouts, skipped = label_universe(store, daily_store, calendar, config)
@@ -147,6 +155,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="comma-separated slippage levels in bps (default: 5,10,20)",
     )
     study.add_argument("--width", type=int, default=150, help="report width in characters")
+    study.add_argument(
+        "--unseal-holdout", action="store_true",
+        help="read the sealed holdout period too. Meant to be used once, at the end, on a frozen "
+             "configuration: after this the holdout is no longer out-of-sample.",
+    )
     study.add_argument("--quiet", action="store_true", help="write the report file without printing it")
     study.add_argument(
         "--plain", action="store_true",
@@ -161,7 +174,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return HANDLERS[args.command](args, DEFAULT_CONFIG)
+    config = DEFAULT_CONFIG
+    if getattr(args, "unseal_holdout", False):
+        config = config.model_copy(update={"holdout_unsealed": True})
+    return HANDLERS[args.command](args, config)
 
 
 if __name__ == "__main__":

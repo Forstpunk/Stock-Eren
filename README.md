@@ -94,6 +94,33 @@ the session has less time to resolve either way.
 - The failed-ORB setup (`failed_orb`) does not run unless the study verdict is `signal`.
   There is no override flag.
 
+## The sealed holdout
+
+Looking at a test period repeatedly is how it stops being out-of-sample. Each decision made
+after a peek fits the model to it a little more, and nothing in the numbers shows it
+happening. `config.holdout_from` seals every session on or after a date: `BarStore` refuses
+to return them, so no study, forecast or backtest can see them however many times it runs.
+
+It is enforced in the store rather than in each caller, because a caller can forget. A test
+asserts that labelling — which never mentions the holdout — inherits the seal anyway.
+
+```python
+Config(holdout_from=date(2023, 1, 1))   # everything from 2023 is invisible
+```
+
+Breaking it is deliberate and loud:
+
+```
+.venv/Scripts/python -m intraday study --unseal-holdout
+```
+
+That is meant to happen **once**, at the end, against one frozen configuration. After it,
+the holdout is in-sample and the honest thing is to say so. The report prints a red line
+whenever the seal is broken.
+
+Sealing costs history, so it is off by default and only worth turning on once there is
+enough data to spare a few years.
+
 ## Changelog of definitions
 
 Research definitions are frozen; when one changes it is recorded here with the date and
@@ -101,6 +128,8 @@ the reason, so a later result can never be quietly explained by a rule that move
 
 | date | change | reason |
 |---|---|---|
+| 2026-09-24 | **Sealed holdout added** (`config.holdout_from`, off by default). | Enforced in `BarStore.read_research`, so every consumer inherits it and none can forget. Breaking it requires `--unseal-holdout` and is announced in red. |
+| 2026-09-24 | **A backtest artifact older than `features.parquet` is refused, not reported.** | A run killed part-way leaves results computed against data that no longer exists. Blending two eras in one report is worse than reporting nothing, so the setup is named as NOT REPORTED and the reader is told to re-run. |
 | 2026-09-23 | **`breakout_depth_atr` demoted to context: partly definitional; caught in code review before results were interpreted.** | `labelling.resolve` measures the move from the breakout bar onward, so the breakout bar's own excursion already counts towards the label. A close at depth ≥ `bust_extension_atr` can never be BUSTED, and one at depth ≥ `sustain_extension_atr` is SUSTAINED immediately. On the current data no BUSTED row exceeds depth 0.18 against a 0.25 threshold. Testing it would have measured the definition, not a mechanism. |
 | 2026-09-23 | **Forecast combination: average of bucket rates → shrunk log-odds.** | An average let a missing feature drag the prediction towards whatever the other features said, so an incomplete row silently changed scale. Under log-odds a missing feature contributes exactly zero. Shrinkage (k=40) stops a six-observation bucket being quoted as if it were evidence. Both parameters pre-registered in RESEARCH.md before implementation; the old method is kept and reported side by side. |
 | 2026-09-23 | **Three-outcome forecast added.** | "Will it fail?" throws away the difference between a breakout that runs and one that drifts, and those are not the same trade. Predictions now carry p_busted, p_sustained and p_neither, scored with the ranked probability score so being wrong by two steps costs more than by one. `p_fail` stays the pre-registered BINARY forecast, scored with Brier; the three-way probabilities are separate columns scored with RPS. An earlier version of this change redefined `p_fail` as the BUSTED share of the three-way split, which quietly swapped the model the Brier score was grading; corrected in code review. |

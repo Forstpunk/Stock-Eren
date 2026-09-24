@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from datetime import time
+from datetime import date, time
 from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -27,6 +27,16 @@ def interval_to_minutes(interval: str) -> int:
 
 class Config(BaseModel):
     model_config = ConfigDict(frozen=True)
+
+    # The sealed holdout. Sessions on or after this date are refused by the store, so no
+    # study, forecast or backtest can see them however many times it is run. Looking at a
+    # test period repeatedly is how it stops being out-of-sample: each decision made after
+    # a peek fits the model to it a little more, and nothing in the numbers shows it.
+    # Setting a date here costs nothing until there is enough history to spare some.
+    holdout_from: date | None = None
+    # Breaking the seal is deliberate, loud, and meant to happen once, at the end, on one
+    # frozen configuration. It is not a config value; the CLI passes it explicitly.
+    holdout_unsealed: bool = False
 
     # Data source - exactly one is active per run. Failure is failure, not a switch.
     source: Literal["yfinance", "kite"] = "yfinance"

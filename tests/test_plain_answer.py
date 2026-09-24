@@ -65,6 +65,7 @@ def make_report(
         backtests={"orb": summary},
         setup_verdicts={"orb": setup_verdict},
         gate_closed=study_verdict != "signal",
+        stale_backtests=(),
         n_sessions=40,
         first_date="2026-07-27",
         last_date="2026-09-21",

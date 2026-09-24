@@ -19,7 +19,7 @@ from typing import Any
 
 import pandas as pd
 
-from intraday.config import IST
+from intraday.config import IST, Config
 from intraday.sources import BAR_COLUMNS
 from intraday.validate import RESEARCH_VERDICTS, SessionVerdict, Verdict
 
@@ -54,12 +54,41 @@ def _read_parquet(path: Path) -> pd.DataFrame:
     return df[list(BAR_COLUMNS)]
 
 
+class SealedHoldoutError(Exception):
+    """Something tried to read sessions inside the sealed holdout."""
+
+
 class BarStore:
-    def __init__(self, root: Path, interval: str) -> None:
+    """Reads and writes bars. Also enforces the holdout seal.
+
+    The seal lives here because every consumer - labelling, features, forecasting,
+    backtests - reaches bars through ``read_research``. Enforcing it at each caller would
+    mean a new caller silently skips it.
+    """
+
+    def __init__(
+        self, root: Path, interval: str, holdout_from: date | None = None, unsealed: bool = False
+    ) -> None:
         self.root = root
         self.interval = interval
+        self.holdout_from = holdout_from
+        self.unsealed = unsealed
         self.verdicts_path = root / "session_verdicts.jsonl"
         self.fetch_log_path = root / "fetch_log.jsonl"
+
+    @classmethod
+    def for_config(cls, config: Config, interval: str) -> BarStore:
+        """The store a run should use: sealed unless the run explicitly unsealed it."""
+        return cls(config.data_dir, interval, config.holdout_from, config.holdout_unsealed)
+
+    @property
+    def sealed(self) -> bool:
+        return self.holdout_from is not None and not self.unsealed
+
+    def _apply_seal(self, bars: pd.DataFrame) -> pd.DataFrame:
+        if not self.sealed or bars.empty:
+            return bars
+        return bars[bars.index.date < self.holdout_from]
 
     # ---- paths -------------------------------------------------------------------
 
@@ -152,7 +181,21 @@ class BarStore:
         return pd.concat(_read_parquet(self._month_path(tier, symbol, m)) for m in months).sort_index()
 
     def read_research(self, symbol: str) -> pd.DataFrame:
-        return self._read_tier("bars", symbol)
+        """Research bars, with anything inside the sealed holdout removed."""
+        return self._apply_seal(self._read_tier("bars", symbol))
+
+    def read_holdout(self, symbol: str) -> pd.DataFrame:
+        """The sealed sessions themselves. Refuses unless the seal was explicitly broken."""
+        if self.sealed:
+            raise SealedHoldoutError(
+                f"sessions from {self.holdout_from} are sealed. They exist to be looked at once, "
+                "at the end, against one frozen configuration. Pass --unseal-holdout to break the "
+                "seal, and understand that every result after that is in-sample."
+            )
+        if self.holdout_from is None:
+            return self._read_tier("bars", symbol).iloc[0:0]
+        bars = self._read_tier("bars", symbol)
+        return bars[bars.index.date >= self.holdout_from]
 
     def read_quarantine(self, symbol: str) -> pd.DataFrame:
         return self._read_tier("quarantine", symbol)

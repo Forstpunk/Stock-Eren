@@ -104,3 +104,45 @@ def test_report_builds_from_project_artifacts(config: Config) -> None:
     assert "orb" in report.setup_verdicts
     # the four sentences are numbered and come before any table
     assert text.index("1. Data:") < text.index("1. Data integrity")
+
+
+def test_backtest_older_than_the_features_is_refused(tmp_path, config: Config) -> None:  # type: ignore[no-untyped-def]
+    """A run killed part-way leaves a backtest describing data that no longer exists.
+
+    Blending two eras of results in one report is worse than reporting nothing, so an
+    artifact older than features.parquet is named and dropped rather than loaded.
+    """
+    import json
+    import os
+    import shutil
+
+    source = Path("data")
+    if not (source / "features.parquet").exists() or not (source / "backtest_orb.json").exists():
+        pytest.skip("project artifacts not present")
+
+    for name in ("features.parquet", "breakouts.parquet", "study.json", "predictions.parquet",
+                 "backtest_orb.json", "backtest_orb.parquet", "nse_holidays.csv", "nse_expiries.csv",
+                 "session_verdicts.jsonl", "fetch_log.jsonl"):
+        if (source / name).exists():
+            shutil.copy2(source / name, tmp_path / name)
+    for tier in ("bars", "quarantine"):
+        if (source / tier).exists():
+            shutil.copytree(source / tier, tmp_path / tier, dirs_exist_ok=True)
+
+    cfg = config.model_copy(update={"data_dir": tmp_path})
+    fresh = build_report(cfg)
+    assert "orb" in fresh.backtests and fresh.stale_backtests == ()
+
+    # age the backtest a minute behind the features
+    features_mtime = (tmp_path / "features.parquet").stat().st_mtime
+    for suffix in ("json", "parquet"):
+        os.utime(tmp_path / f"backtest_orb.{suffix}", (features_mtime - 60, features_mtime - 60))
+
+    stale = build_report(cfg)
+    assert "orb" not in stale.backtests
+    assert stale.stale_backtests == ("orb",)
+
+    console = Console(record=True, width=150, file=io.StringIO())
+    render_report(stale, console)
+    text = console.export_text()
+    assert "NOT REPORTED" in text and "Re-run study" in text
